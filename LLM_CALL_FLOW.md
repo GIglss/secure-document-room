@@ -2,7 +2,7 @@
 
 There is exactly one LLM call site in the codebase. It lives in `backend/services/rag_engine.py` inside `answer_question()`. All Q&A requests — from both senders and recipients — flow through it.
 
-The provider is selected at runtime via `LLM_PROVIDER` in `.env`. Supported values: `anthropic` (default) and `ollama` (local model).
+The provider is selected at runtime via `LLM_PROVIDER` in `.env`. Supported values: `anthropic` (default) and `mlx` (local MLX model via `mlx_lm.server`).
 
 ---
 
@@ -45,16 +45,18 @@ services/rag_engine.py → answer_question(room_id, question)
   │
   ├─ 3. LLM dispatch → _call_llm(user_message)
   │
-  │     LLM_PROVIDER=anthropic (default)          LLM_PROVIDER=ollama
+  │     LLM_PROVIDER=anthropic (default)          LLM_PROVIDER=mlx
   │     ──────────────────────────────────         ──────────────────────────────
-  │     _call_anthropic(user_message)              _call_ollama(user_message)
-  │       Anthropic SDK                              httpx.post (sync, timeout=120s)
-  │       model: ANTHROPIC_MODEL                     POST {OLLAMA_BASE_URL}/api/chat
-  │               (default: claude-sonnet-4-6)       model: OLLAMA_MODEL
-  │       max_tokens: 1024                                   (default: llama3.2)
-  │       system= SYSTEM_PROMPT                      messages: [system, user]
-  │       messages: [{role:user, content:…}]         stream: false
-  │       → message.content[0].text                → data["message"]["content"]
+  │     _call_anthropic(user_message)              _call_mlx(user_message)
+  │       Anthropic SDK                              openai.OpenAI client
+  │       model: ANTHROPIC_MODEL                     base_url: MLX_BASE_URL
+  │               (default: claude-sonnet-4-6)               (default: http://localhost:8080/v1)
+  │       max_tokens: 1024                           model: MLX_MODEL
+  │       system= SYSTEM_PROMPT                              (default: mlx-community/Qwen3.5-4B-MLX-4bit)
+  │       messages: [{role:user, content:…}]         api_key: "not-required"
+  │       → message.content[0].text                  messages: [system, user]
+  │                                                   stream: false
+  │                                                 → choices[0].message.content
   │
   └─ 4. Return
         { answer: str, citations: list[Citation] }
@@ -132,29 +134,30 @@ Please answer based only on the above context, with appropriate citations.
 
 | Variable | Default | Purpose |
 |----------|---------|---------|
-| `LLM_PROVIDER` | `anthropic` | `anthropic` or `ollama` |
+| `LLM_PROVIDER` | `anthropic` | `anthropic` or `mlx` |
 | `ANTHROPIC_API_KEY` | — | Required when provider=anthropic |
 | `ANTHROPIC_MODEL` | `claude-sonnet-4-6` | Any Anthropic model ID |
-| `OLLAMA_BASE_URL` | `http://localhost:11434` | Ollama server URL |
-| `OLLAMA_MODEL` | `llama3.2` | Any model pulled in Ollama |
+| `MLX_BASE_URL` | `http://localhost:8080/v1` | MLX server OpenAI-compatible endpoint |
+| `MLX_MODEL` | `mlx-community/Qwen3.5-4B-MLX-4bit` | Any HuggingFace MLX model ID |
 
-The active config (provider + model, no keys) is exposed at `GET /api/llm-config` and displayed as a badge in the Q&A interface header.
+The active config (provider + model, no keys) is exposed at `GET /api/llm-config` and displayed as a badge in the Q&A interface header (green "Local MLX · Qwen3.5-4B-MLX-4bit" vs blue "Cloud · claude-sonnet-4-6").
 
-### Using Ollama
+### Using MLX
+
+The MLX server (`mlx_lm.server`) exposes an OpenAI-compatible API. Start it from the `local-ai` repo:
 
 ```bash
-# 1. Install Ollama: https://ollama.com
-# 2. Pull a model
-ollama pull llama3.2        # fast, good general performance
-ollama pull mistral         # strong instruction-following
-ollama pull llama3.1:8b     # larger context window
+# Start the inference server (downloads model on first run)
+cd /path/to/local-ai/mlx
+./start.sh                              # uses Qwen3.5-4B-MLX-4bit by default
+./start.sh --model mlx-community/Qwen3-14B-4bit   # larger model
 
-# 3. Set in backend/.env
-LLM_PROVIDER=ollama
-OLLAMA_MODEL=llama3.2
+# Then set in backend/.env
+LLM_PROVIDER=mlx
+MLX_MODEL=mlx-community/Qwen3.5-4B-MLX-4bit
 ```
 
-Then restart the backend. The Q&A interface will show a green "Local · llama3.2" badge.
+Restart the backend. The Q&A interface will show a green **"Local MLX · Qwen3.5-4B-MLX-4bit"** badge.
 
 ---
 
@@ -166,8 +169,8 @@ Then restart the backend. The Q&A interface will show a green "Local · llama3.2
 | ChromaDB returns no results | both | Returns "couldn't find relevant information"; no LLM call made |
 | `ANTHROPIC_API_KEY` not set | anthropic | Raises `ValueError` with clear message; HTTP 500 |
 | Anthropic rate limit / API error | anthropic | Exception propagates; HTTP 500 with detail |
-| Ollama server not running | ollama | `httpx.ConnectError`; HTTP 500 — start Ollama first |
-| Model not pulled in Ollama | ollama | Ollama returns 404; HTTP 500 — run `ollama pull {model}` |
+| MLX server not running | mlx | `openai.APIConnectionError`; HTTP 500 — run `./start.sh` in `local-ai/mlx` |
+| Model not loaded in MLX server | mlx | Server returns error; HTTP 500 — restart server with correct `--model` |
 | LLM returns empty content | both | Falls back to `"Unable to generate answer."` |
 
 ---

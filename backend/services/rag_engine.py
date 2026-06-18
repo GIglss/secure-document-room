@@ -20,11 +20,11 @@ Rules you must follow:
 def get_llm_config() -> Dict[str, str]:
     """Return current LLM provider configuration (no secrets)."""
     provider = os.getenv("LLM_PROVIDER", "anthropic")
-    if provider == "ollama":
+    if provider == "mlx":
         return {
-            "provider": "ollama",
-            "model": os.getenv("OLLAMA_MODEL", "llama3.2"),
-            "base_url": os.getenv("OLLAMA_BASE_URL", "http://localhost:11434"),
+            "provider": "mlx",
+            "model": os.getenv("MLX_MODEL", "mlx-community/Qwen3.5-4B-MLX-4bit"),
+            "base_url": os.getenv("MLX_BASE_URL", "http://localhost:8080/v1"),
         }
     return {
         "provider": "anthropic",
@@ -102,33 +102,28 @@ def _call_anthropic(user_message: str) -> str:
     return message.content[0].text if message.content else "Unable to generate answer."
 
 
-def _call_ollama(user_message: str) -> str:
-    import httpx
+def _call_mlx(user_message: str) -> str:
+    from openai import OpenAI
 
-    base_url = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
-    model = os.getenv("OLLAMA_MODEL", "llama3.2")
+    base_url = os.getenv("MLX_BASE_URL", "http://localhost:8080/v1")
+    model = os.getenv("MLX_MODEL", "mlx-community/Qwen3.5-4B-MLX-4bit")
 
-    response = httpx.post(
-        f"{base_url}/api/chat",
-        json={
-            "model": model,
-            "messages": [
-                {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": user_message},
-            ],
-            "stream": False,
-        },
-        timeout=120.0,
+    client = OpenAI(base_url=base_url, api_key="not-required")
+    response = client.chat.completions.create(
+        model=model,
+        messages=[
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user", "content": user_message},
+        ],
+        stream=False,
     )
-    response.raise_for_status()
-    data = response.json()
-    return data.get("message", {}).get("content", "Unable to generate answer.")
+    return response.choices[0].message.content or "Unable to generate answer."
 
 
 def _call_llm(user_message: str) -> str:
     provider = os.getenv("LLM_PROVIDER", "anthropic")
-    if provider == "ollama":
-        return _call_ollama(user_message)
+    if provider == "mlx":
+        return _call_mlx(user_message)
     return _call_anthropic(user_message)
 
 

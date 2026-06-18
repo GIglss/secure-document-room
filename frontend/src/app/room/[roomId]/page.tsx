@@ -80,13 +80,13 @@ export default function RoomQA() {
           {llmConfig && (
             <span
               className={`text-xs font-medium px-2 py-0.5 rounded-full border ${
-                llmConfig.provider === "ollama"
+                llmConfig.provider === "mlx"
                   ? "bg-green-50 border-green-200 text-green-700"
                   : "bg-blue-50 border-blue-200 text-blue-700"
               }`}
-              title={llmConfig.provider === "ollama" ? "Running on local model" : "Running on Anthropic API"}
+              title={llmConfig.provider === "mlx" ? "Running on local MLX model" : "Running on Anthropic API"}
             >
-              {llmConfig.provider === "ollama" ? "Local" : "Cloud"} · {llmConfig.model}
+              {llmConfig.provider === "mlx" ? "Local MLX" : "Cloud"} · {llmConfig.model.split("/").pop()}
             </span>
           )}
         </div>
