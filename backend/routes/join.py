@@ -1,10 +1,10 @@
-import uuid
-import random
-from datetime import datetime
+import secrets
+from datetime import datetime, timedelta
 from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy.orm import Session
 from database import get_db
 import models, schemas
+import config
 from services.audit_service import log_event
 
 router = APIRouter(prefix="/join", tags=["join"])
@@ -57,12 +57,19 @@ def verify_email(token: str, payload: schemas.VerifyEmailRequest, db: Session = 
         raise HTTPException(status_code=403, detail="Access revoked")
     if member.email.lower() != payload.email.lower():
         raise HTTPException(status_code=400, detail="Email does not match the invite")
-    code = str(random.randint(100000, 999999))
+    # Cryptographically-random 6-digit code with expiry + attempt reset
+    code = f"{secrets.randbelow(1000000):06d}"
     member.verification_code = code
+    member.code_expires_at = datetime.utcnow() + timedelta(minutes=config.CODE_TTL_MINUTES)
+    member.verification_attempts = 0
     db.commit()
-    # In MVP: return the code directly (no real email sending)
-    print(f"[DEMO] Verification code for {payload.email}: {code}")
-    return {"message": "Verification code generated", "demo_code": code}
+    print(f"[DEV] Verification code for {payload.email}: {code}")
+    response = {"message": "Verification code sent"}
+    # Demo convenience ONLY in dev: surface the code so the flow can be tested
+    # without email infrastructure. Never enabled in production (DEV_MODE=false).
+    if config.DEV_MODE:
+        response["demo_code"] = code
+    return response
 
 
 @router.post("/{token}/confirm", response_model=schemas.SessionResponse)
@@ -72,12 +79,28 @@ def confirm_code(token: str, payload: schemas.ConfirmCodeRequest, db: Session = 
         raise HTTPException(status_code=404, detail="Invalid invite link")
     if member.email.lower() != payload.email.lower():
         raise HTTPException(status_code=400, detail="Email mismatch")
-    if not member.verification_code or member.verification_code != payload.code:
+    if not member.verification_code:
+        raise HTTPException(status_code=400, detail="No active code. Request a new verification code.")
+    if member.code_expires_at and member.code_expires_at < datetime.utcnow():
+        member.verification_code = None
+        db.commit()
+        raise HTTPException(status_code=400, detail="Verification code expired. Request a new one.")
+    if member.verification_attempts >= config.CODE_MAX_ATTEMPTS:
+        member.verification_code = None
+        db.commit()
+        raise HTTPException(status_code=429, detail="Too many failed attempts. Request a new verification code.")
+    if not secrets.compare_digest(member.verification_code, payload.code):
+        member.verification_attempts += 1
+        db.commit()
         raise HTTPException(status_code=400, detail="Invalid verification code")
-    session_token = str(uuid.uuid4())
+    # Success — issue session and clear the one-time code
+    session_token = secrets.token_urlsafe(32)
     member.status = "verified"
     member.session_token = session_token
+    member.session_expires_at = datetime.utcnow() + timedelta(hours=config.SESSION_TTL_HOURS)
     member.verified_at = datetime.utcnow()
+    member.verification_code = None
+    member.code_expires_at = None
     db.commit()
     room = db.query(models.Room).filter(models.Room.id == member.room_id).first()
     log_event(db, member.room_id, "member_verified", {"email": member.email}, member_id=member.id)

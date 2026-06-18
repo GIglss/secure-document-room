@@ -124,9 +124,15 @@ Single function `log_event()` — inserts a row into `audit_logs`. Never updates
 | Threat | Mitigation |
 |--------|-----------|
 | Raw file download | Files stored server-side only; no static file serving to clients; no download endpoint |
-| Content extraction via Q&A | LLM system prompt forbids verbatim reproduction; answers are synthesized summaries |
-| Unauthorized room access | Room membership verified by email + 6-digit code before session token is issued |
-| Replay of session tokens | Tokens are UUIDs scoped to a single `room_members` row; revoked immediately on member revocation |
+| Content extraction via Q&A | LLM prompt forbids verbatim reproduction; answers synthesized; **per-accessor/per-room rate limiting** (`QA_RATE_MAX`/`QA_RATE_WINDOW_SECONDS`) deters bulk extraction via repeated queries |
+| Unauthorized room access | Email + 6-digit code before session issued. Code is `secrets`-random, **expires** (`CODE_TTL_MINUTES`), **attempt-capped** (`CODE_MAX_ATTEMPTS`, then invalidated), one-time, and compared with `compare_digest` |
+| Verification-code brute force | Expiry + attempt cap + single-use; 429 on cap breach |
+| Replay / stale sessions | Session tokens are `secrets.token_urlsafe(32)`, scoped to one `room_members` row, **expire** (`SESSION_TTL_HOURS`), revoked immediately on member revocation |
+| Expired-room access | Expiry enforced on the Q&A path itself, not only on sender reload |
+| Forgeable JWTs | App **refuses to start** with the default `SECRET_KEY` when `DEV_MODE=false` |
+| Path traversal / upload abuse | Upload filenames sanitized to a safe basename; size cap (`MAX_UPLOAD_BYTES`, 413); empty files rejected |
+| Credential bypass | Verification code only surfaced in API response when `DEV_MODE=true`; password policy enforced (min length, bcrypt 72-byte cap) |
+| Wrong / unsupported citations | Answers grounded against retrieved sources; only `[N]`-referenced citations returned; ungroundable answers flagged `grounded=false` |
 | Audit tampering | `audit_logs` rows are insert-only; no update/delete path exists in the codebase |
 | Screenshot exfiltration | Not preventable at software layer — mitigated by watermarking (post-MVP), legal terms on acceptance, and audit trail |
 
@@ -156,6 +162,7 @@ FRONTEND_URL        http://localhost:3000
 | Vector store | ChromaDB local | Pinecone / Weaviate for multi-instance deployments |
 | File storage | Local filesystem | AWS S3 with SSE-S3 |
 | Auth | Custom JWT | Auth0 / Clerk (adds SSO, MFA) |
-| Email verification | Code returned in API response | SMTP / SendGrid |
+| Email verification | Code returned in API response (`DEV_MODE` only) | SMTP / SendGrid |
+| Rate limiting | In-memory sliding window (single process) | Redis-backed store for multi-worker / multi-instance |
 | LLM | Anthropic cloud API | On-premise Llama / Mistral or confidential compute (Tinfoil, Opaque) for zero-knowledge claim |
 | Deployment | Single process | Containerized; separate worker process for background indexing |

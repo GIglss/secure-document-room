@@ -59,15 +59,26 @@ services/rag_engine.py → answer_question(room_id, question)
   │                                                 → choices[0].message.content
   │
   └─ 4. Return
-        { answer: str, citations: list[Citation] }
+        answer_text (raw model output)
+  │
+  ├─ 5. Grounding & citation verification → _ground_answer()
+  │     - If answer contains the "cannot answer from context" phrase:
+  │         → { answer, citations: [], grounded: false }
+  │     - Else parse [N] markers actually used in the answer:
+  │         → return only those retrieved sources, each with its marker `number`
+  │         → if the answer cited nothing, surface the top source as a fallback
+  │         → { answer, citations: [...referenced], grounded: true }
+  │
+  └─ Return { answer, citations, grounded }
   │
   ▼
 routes/qa.py
+  │  Rate-limit check (per accessor, per room) BEFORE generation — 429 if exceeded
   │  Logs to audit_logs: event_type="question_asked"
-  │  event_data includes: question, answer_preview[:200], citation_count
+  │  event_data includes: question, answer_preview[:200], citation_count, grounded
   │
   ▼
-HTTP 200 → { answer, citations, question_id }
+HTTP 200 → { answer, citations, grounded, question_id }
 ```
 
 **Note on embeddings:** Both providers use the same ChromaDB `DefaultEmbeddingFunction` (all-MiniLM-L6-v2, runs locally). Switching LLM provider does not change retrieval behavior.

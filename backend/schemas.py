@@ -136,6 +136,7 @@ class QARequest(BaseModel):
 
 
 class Citation(BaseModel):
+    number: Optional[int] = None
     document_name: str
     page_ref: Optional[str]
     excerpt: str
@@ -144,6 +145,7 @@ class Citation(BaseModel):
 class QAResponse(BaseModel):
     answer: str
     citations: List[Citation]
+    grounded: bool = True
     question_id: Optional[str] = None
 
 

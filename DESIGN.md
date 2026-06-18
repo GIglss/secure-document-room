@@ -122,6 +122,68 @@ Records product and engineering decisions made during the MVP build. Each entry 
 
 ---
 
+### D-108 · Q&A rate limiting as a containment control
+
+**Decision:** Every Q&A request is rate-limited per accessor, per room (`QA_RATE_MAX` requests per `QA_RATE_WINDOW_SECONDS`). Implemented as an in-memory sliding window in `services/rate_limit.py`.
+
+**Rationale:** The handoff brief lists rate limiting in Component 6 (Enforcement layer) specifically to prevent "content extraction via repeated narrow queries." Without it, a recipient could reconstruct documents by asking thousands of targeted questions. The limit is a deterrent and a forcing function, not a hard wall.
+
+**When to revisit:** Multi-worker deployment — the in-memory store is per-process. Swap for a Redis-backed counter with the same `check_rate_limit` interface.
+
+---
+
+### D-109 · Verification codes: expiry, attempt cap, single-use, DEV-gated demo
+
+**Decision:** Codes are `secrets`-random, expire after `CODE_TTL_MINUTES`, are invalidated after `CODE_MAX_ATTEMPTS` failures, are cleared on first success, and are compared with `secrets.compare_digest`. The code is only returned in the API response when `DEV_MODE=true`.
+
+**Rationale:** The original MVP returned the code unconditionally, which completely defeated email verification — anyone with a link could authenticate. A 6-digit code with no expiry or attempt cap is also brute-forceable. These changes make the identity check real while preserving the demo convenience behind an explicit flag.
+
+**Must change before production:** Wire in real email sending; `DEV_MODE` must be `false`.
+
+---
+
+### D-110 · Recipient session TTL
+
+**Decision:** Recipient session tokens (`secrets.token_urlsafe(32)`) expire `SESSION_TTL_HOURS` after terms acceptance and are checked on every Q&A request.
+
+**Rationale:** Sessions previously lived forever until explicit revocation. A bounded lifetime limits the blast radius of a leaked token and matches the deal-scoped nature of recipient access (D-104).
+
+---
+
+### D-111 · Fail-fast on insecure production config
+
+**Decision:** `config.validate_startup_config()` raises at startup if `SECRET_KEY` is the known default while `DEV_MODE=false`.
+
+**Rationale:** A forgeable JWT signing key silently shipping to production is a critical risk. Failing loudly at boot is far safer than discovering it after deployment.
+
+---
+
+### D-112 · Upload hardening — filename sanitization and size cap
+
+**Decision:** Upload filenames are reduced to a safe basename (alphanumerics, dot, dash, underscore) before being joined into a path; uploads over `MAX_UPLOAD_BYTES` are rejected with 413; empty files are rejected.
+
+**Rationale:** The original `{doc_id}_{file.filename}` path join trusted user-supplied filenames (path-traversal risk) and had no size limit (DoS via huge uploads). The `doc_id` prefix made traversal unlikely but not impossible; sanitization removes the risk entirely.
+
+---
+
+### D-113 · Citation grounding and verification
+
+**Decision:** After generation, `_ground_answer()` parses the `[N]` markers the answer actually used and returns only those sources (each carrying its marker `number`). Answers containing the model's "cannot answer from context" phrase are flagged `grounded=false` with no citations. If the model cites nothing, the top retrieved source is surfaced so there is always one verifiable reference.
+
+**Rationale:** The brief calls citation accuracy critical: "a wrong citation is worse than no answer… a lawyer acting on a hallucinated clause reference could cause real harm." The original code returned all five retrieved chunks as citations regardless of what the answer used, implying support that may not exist. Grounding ties displayed citations to what the answer actually referenced.
+
+**Limitation:** This verifies *which* sources were referenced, not that the claim is factually entailed by them. Stronger entailment-checking is a post-MVP enhancement.
+
+---
+
+### D-114 · Singleton embedding function
+
+**Decision:** The ChromaDB embedding function is instantiated once at module level instead of on every `_get_collection` call.
+
+**Rationale:** `DefaultEmbeddingFunction()` loads the all-MiniLM-L6-v2 model. Creating it per retrieval call risked repeated model setup on every question. A singleton loads it once per process.
+
+---
+
 ## Open decisions (from handoff brief)
 
 These are unresolved and should be addressed before Phase 2 design partner onboarding:

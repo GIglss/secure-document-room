@@ -1,4 +1,5 @@
 import os
+from contextlib import asynccontextmanager
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -6,14 +7,27 @@ load_dotenv()
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from database import engine, Base
+import config
 from routes import auth, rooms, documents, invites, join, qa, audit
 
 FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:3000")
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    config.validate_startup_config()
+    Base.metadata.create_all(bind=engine)
+    os.makedirs(os.getenv("UPLOAD_DIR", "./uploads"), exist_ok=True)
+    os.makedirs(os.getenv("CHROMA_DIR", "./data/chroma"), exist_ok=True)
+    print(f"Secure Document Room API started (DEV_MODE={config.DEV_MODE})")
+    yield
+
 
 app = FastAPI(
     title="Secure Document Room API",
     description="Sealed AI-powered document room for two-party sensitive document sharing",
     version="0.1.0",
+    lifespan=lifespan,
 )
 
 app.add_middleware(
@@ -23,14 +37,6 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-
-@app.on_event("startup")
-async def startup():
-    Base.metadata.create_all(bind=engine)
-    os.makedirs(os.getenv("UPLOAD_DIR", "./uploads"), exist_ok=True)
-    os.makedirs(os.getenv("CHROMA_DIR", "./data/chroma"), exist_ok=True)
-    print("Secure Document Room API started")
 
 
 app.include_router(auth.router, prefix="/api")

@@ -1,9 +1,11 @@
 import os
+import re
 import uuid
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, BackgroundTasks
 from sqlalchemy.orm import Session
-from database import get_db
+from database import get_db, SessionLocal
 import models, schemas
+import config
 from auth import get_current_user
 from services.audit_service import log_event
 from services.document_processor import process_document
@@ -13,6 +15,13 @@ UPLOAD_DIR = os.getenv("UPLOAD_DIR", "./uploads")
 ALLOWED_TYPES = {"pdf": "application/pdf", "docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document", "xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"}
 
 router = APIRouter(prefix="/rooms", tags=["documents"])
+
+
+def _sanitize_filename(filename: str) -> str:
+    """Strip any path components and unsafe characters to prevent traversal."""
+    base = os.path.basename(filename or "").replace("\\", "")
+    base = re.sub(r"[^A-Za-z0-9._-]", "_", base).strip("._")
+    return base or "upload"
 
 
 def _get_room_or_404(room_id: str, sender_id: int, db: Session) -> models.Room:
@@ -29,12 +38,9 @@ def _detect_file_type(filename: str) -> str:
     return None
 
 
-def _index_in_background(doc_id: str, room_id: str, doc_name: str, file_path: str, file_type: str, db_url: str):
-    from sqlalchemy import create_engine
-    from sqlalchemy.orm import sessionmaker
-    engine = create_engine(db_url, connect_args={"check_same_thread": False})
-    BgSession = sessionmaker(bind=engine)
-    db = BgSession()
+def _index_in_background(doc_id: str, room_id: str, doc_name: str, file_path: str, file_type: str):
+    # Reuse the shared engine via SessionLocal (no per-upload engine creation)
+    db = SessionLocal()
     try:
         chunks = process_document(file_path, file_type)
         count = index_document(room_id, doc_id, doc_name, chunks)
@@ -62,13 +68,22 @@ async def upload_document(
     if not file_type:
         raise HTTPException(status_code=400, detail="Unsupported file type. Use PDF, DOCX, or XLSX.")
 
+    content = await file.read()
+    if len(content) > config.MAX_UPLOAD_BYTES:
+        raise HTTPException(
+            status_code=413,
+            detail=f"File exceeds the {config.MAX_UPLOAD_BYTES // (1024 * 1024)} MB limit.",
+        )
+    if len(content) == 0:
+        raise HTTPException(status_code=400, detail="Uploaded file is empty.")
+
     doc_id = str(uuid.uuid4())
+    original_filename = _sanitize_filename(file.filename)
     room_upload_dir = os.path.join(UPLOAD_DIR, room_id)
     os.makedirs(room_upload_dir, exist_ok=True)
-    safe_name = f"{doc_id}_{file.filename}"
+    safe_name = f"{doc_id}_{original_filename}"
     file_path = os.path.join(room_upload_dir, safe_name)
 
-    content = await file.read()
     with open(file_path, "wb") as f:
         f.write(content)
 
@@ -76,7 +91,7 @@ async def upload_document(
         id=doc_id,
         room_id=room_id,
         filename=safe_name,
-        original_filename=file.filename,
+        original_filename=original_filename,
         file_type=file_type,
         file_size=len(content),
         file_path=file_path,
@@ -85,12 +100,11 @@ async def upload_document(
     db.commit()
     db.refresh(doc)
 
-    from database import DATABASE_URL
     background_tasks.add_task(
-        _index_in_background, doc_id, room_id, file.filename, file_path, file_type, DATABASE_URL
+        _index_in_background, doc_id, room_id, original_filename, file_path, file_type
     )
 
-    log_event(db, room_id, "document_uploaded", {"filename": file.filename, "size": len(content)}, sender_id=current_user.id)
+    log_event(db, room_id, "document_uploaded", {"filename": original_filename, "size": len(content)}, sender_id=current_user.id)
     return doc
 
 

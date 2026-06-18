@@ -1,3 +1,50 @@
+# Documentation Update Trace — Hardening Pass: Security, RAG Grounding, Efficiency
+
+> Generated June 17, 2026.
+> Purpose: Records a review-driven hardening pass against the handoff brief covering security, architecture/logic, efficiency, and functionality.
+> Status: **APPLIED** — June 17, 2026.
+
+---
+
+## What Changed in the Codebase
+
+### New files
+- `backend/config.py` — centralized settings + `validate_startup_config()` (refuses default `SECRET_KEY` when `DEV_MODE=false`); policy constants for codes, sessions, rate limiting, uploads, passwords
+- `backend/services/rate_limit.py` — in-memory sliding-window rate limiter (Redis-swappable interface)
+
+### Modified files
+**Milestone 1 — Security**
+- `backend/routes/join.py` — verification code is now `secrets`-random, expires (`CODE_TTL_MINUTES`), capped at `CODE_MAX_ATTEMPTS` (429 + invalidation), one-time (cleared on success); `demo_code` only returned when `DEV_MODE`; session token is `secrets.token_urlsafe(32)` with `SESSION_TTL_HOURS` expiry; `compare_digest` used for code check
+- `backend/routes/qa.py` — enforces room expiry on the Q&A path itself; checks recipient session expiry; per-accessor/per-room rate limiting (429); rejects empty questions
+- `backend/routes/documents.py` — filename sanitization (path-traversal safe), max upload size (`MAX_UPLOAD_BYTES`, 413), empty-file rejection
+- `backend/routes/auth.py` — `validate_password()` on register
+- `backend/auth.py` — reads `SECRET_KEY` from config; password policy helper; `verify_password` guards bcrypt `ValueError`
+- `backend/models.py` — `RoomMember` gains `code_expires_at`, `verification_attempts`, `session_expires_at`
+
+**Milestone 2 — RAG citation grounding**
+- `backend/services/rag_engine.py` — `_ground_answer()` parses `[N]` markers, returns only the cited sources (each carrying its marker `number`), flags ungroundable answers (`grounded=false`); singleton embedding function
+- `backend/schemas.py` — `Citation.number`, `QAResponse.grounded`
+- `frontend/src/app/room/[roomId]/page.tsx` — renders citation numbers from markers, friendly 429 banner, "could not be answered" panel state
+
+**Milestone 3 — Efficiency & architecture**
+- `backend/services/rag_engine.py` — embedding model loaded once (was per-query)
+- `backend/routes/documents.py` — background indexer reuses `SessionLocal` (was a new engine per upload)
+- `backend/main.py` — `lifespan` handler (replaces deprecated `on_event`), runs startup config validation
+- `backend/routes/rooms.py` — room list uses aggregate `COUNT` queries (was loading every relationship row)
+- `backend/routes/audit.py` — `limit`/`offset` pagination
+- `backend/.env.example` — documents all new policy variables
+
+## Documentation Changes
+
+| File | What was updated |
+|------|-----------------|
+| `ARCHITECTURE.md` | Security model table expanded with new controls (rate limiting, code/session policy, upload limits, startup guard) |
+| `DESIGN.md` | New decisions D-108 to D-114 (security hardening + grounding) |
+| `LLM_CALL_FLOW.md` | Added citation-grounding step and `grounded` flag to the flow |
+| `HOW_DOES_ALL_CONVERGE.md` | No changes — flow and entry points unchanged |
+
+---
+
 # Documentation Update Trace — MVP: Secure Document Room Initial Build
 
 > Generated June 16, 2026.

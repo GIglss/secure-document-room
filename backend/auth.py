@@ -1,4 +1,3 @@
-import os
 import bcrypt
 from datetime import datetime, timedelta
 from typing import Optional
@@ -7,13 +6,28 @@ from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from sqlalchemy.orm import Session
 from database import get_db
+import config
 import models
 
-SECRET_KEY = os.getenv("SECRET_KEY", "dev-secret-key-change-in-production")
+SECRET_KEY = config.SECRET_KEY
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_HOURS = 24
 
 bearer_scheme = HTTPBearer(auto_error=False)
+
+
+def validate_password(password: str):
+    """Enforce password policy. Raises HTTP 400 on violation."""
+    if len(password) < config.MIN_PASSWORD_LENGTH:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Password must be at least {config.MIN_PASSWORD_LENGTH} characters.",
+        )
+    if len(password.encode("utf-8")) > config.MAX_PASSWORD_BYTES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Password must be at most {config.MAX_PASSWORD_BYTES} bytes.",
+        )
 
 
 def hash_password(password: str) -> str:
@@ -21,7 +35,10 @@ def hash_password(password: str) -> str:
 
 
 def verify_password(plain: str, hashed: str) -> bool:
-    return bcrypt.checkpw(plain.encode("utf-8"), hashed.encode("utf-8"))
+    try:
+        return bcrypt.checkpw(plain.encode("utf-8"), hashed.encode("utf-8"))
+    except ValueError:
+        return False
 
 
 def create_access_token(data: dict, expires_delta: Optional[timedelta] = None) -> str:

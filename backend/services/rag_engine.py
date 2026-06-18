@@ -1,4 +1,5 @@
 import os
+import re
 from typing import List, Dict, Any
 import chromadb
 from chromadb.utils import embedding_functions
@@ -6,6 +7,10 @@ from chromadb.utils import embedding_functions
 CHROMA_DIR = os.getenv("CHROMA_DIR", "./data/chroma")
 
 _chroma_client = None
+_embedding_fn = None
+
+# Phrase the model is instructed to use when the context lacks an answer.
+NO_ANSWER_MARKER = "do not contain information to answer"
 
 SYSTEM_PROMPT = """You are a secure document assistant operating inside a sealed document room. Your role is to answer questions based ONLY on the provided document excerpts.
 
@@ -40,12 +45,19 @@ def get_chroma_client() -> chromadb.PersistentClient:
     return _chroma_client
 
 
+def _get_embedding_fn():
+    """Singleton embedding function — avoids reloading the model on every call."""
+    global _embedding_fn
+    if _embedding_fn is None:
+        _embedding_fn = embedding_functions.DefaultEmbeddingFunction()
+    return _embedding_fn
+
+
 def _get_collection(room_id: str):
     client = get_chroma_client()
-    ef = embedding_functions.DefaultEmbeddingFunction()
     return client.get_or_create_collection(
         name=f"room_{room_id.replace('-', '_')}",
-        embedding_function=ef,
+        embedding_function=_get_embedding_fn(),
     )
 
 
@@ -149,14 +161,15 @@ def answer_question(room_id: str, question: str) -> Dict[str, Any]:
         }
 
     context_parts = []
-    citations = []
+    all_citations = []  # indexed 0..N-1, marker number = index + 1
     for i, (doc_text, meta) in enumerate(zip(docs, metas)):
         doc_name = meta.get("doc_name", "Unknown Document")
         page_ref = meta.get("page_num") or meta.get("section") or meta.get("sheet_name")
         context_parts.append(
             f"[{i+1}] Source: {doc_name}" + (f" (p.{page_ref})" if page_ref else "") + f"\n{doc_text}"
         )
-        citations.append({
+        all_citations.append({
+            "number": i + 1,
             "document_name": doc_name,
             "page_ref": str(page_ref) if page_ref else None,
             "excerpt": doc_text[:200] + "..." if len(doc_text) > 200 else doc_text,
@@ -172,4 +185,29 @@ Question: {question}
 Please answer based only on the above context, with appropriate citations."""
 
     answer_text = _call_llm(user_message)
-    return {"answer": answer_text, "citations": citations}
+    return _ground_answer(answer_text, all_citations)
+
+
+def _ground_answer(answer_text: str, all_citations: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """Verify the answer against retrieved sources.
+
+    Returns only the citations the answer actually referenced (via [N] markers),
+    and flags answers the model could not ground in the documents. This is the
+    citation-verification step: a wrong or unsupported citation is worse than no
+    answer in a legal/financial context.
+    """
+    # Model signalled it could not answer from the provided context
+    if NO_ANSWER_MARKER in answer_text.lower():
+        return {"answer": answer_text, "citations": [], "grounded": False}
+
+    # Extract the [N] markers the answer used and map them to retrieved sources
+    referenced = {int(n) for n in re.findall(r"\[(\d+)\]", answer_text)}
+    by_number = {c["number"]: c for c in all_citations}
+    cited = [by_number[n] for n in sorted(referenced) if n in by_number]
+
+    # If the model cited nothing, surface the top retrieved source so the user
+    # always has at least one verifiable reference to inspect.
+    if not cited and all_citations:
+        cited = [all_citations[0]]
+
+    return {"answer": answer_text, "citations": cited, "grounded": bool(cited)}

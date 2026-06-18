@@ -3,8 +3,8 @@ import { useState, useEffect, useRef } from "react";
 import { useRouter, useParams } from "next/navigation";
 import { askQuestion } from "@/lib/api";
 
-type Citation = { document_name: string; page_ref?: string; excerpt: string };
-type Message = { id: string; question: string; answer: string; citations: Citation[]; loading?: boolean };
+type Citation = { number?: number; document_name: string; page_ref?: string; excerpt: string };
+type Message = { id: string; question: string; answer: string; citations: Citation[]; grounded?: boolean; loading?: boolean };
 
 export default function RoomQA() {
   const router = useRouter();
@@ -52,13 +52,17 @@ export default function RoomQA() {
     try {
       const result = await askQuestion(roomId, q, sessionToken);
       setMessages((prev) =>
-        prev.map((m) => m.id === tempId ? { ...m, answer: result.answer, citations: result.citations, loading: false } : m)
+        prev.map((m) => m.id === tempId ? { ...m, answer: result.answer, citations: result.citations, grounded: result.grounded, loading: false } : m)
       );
       setActiveCitations(result.citations);
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : "Failed to get answer";
       setMessages((prev) => prev.map((m) => m.id === tempId ? { ...m, answer: `Error: ${msg}`, loading: false } : m));
-      setError(msg);
+      setError(
+        /rate limit/i.test(msg)
+          ? "You're sending questions too quickly. Please wait a moment before asking again."
+          : msg
+      );
     } finally {
       setLoading(false);
     }
@@ -69,6 +73,8 @@ export default function RoomQA() {
     sessionStorage.removeItem("sdr_room_id");
     router.push("/");
   };
+
+  const latestAnswered = [...messages].reverse().find((m) => !m.loading);
 
   return (
     <div className="h-screen bg-gray-50 flex flex-col">
@@ -177,12 +183,16 @@ export default function RoomQA() {
           </div>
           <div className="flex-1 overflow-y-auto px-4 py-3 space-y-3">
             {activeCitations.length === 0 ? (
-              <p className="text-xs text-gray-400 text-center pt-8">Ask a question to see relevant source citations.</p>
+              latestAnswered?.grounded === false ? (
+                <p className="text-xs text-gray-400 text-center pt-8">This question could not be answered from the room documents.</p>
+              ) : (
+                <p className="text-xs text-gray-400 text-center pt-8">Ask a question to see relevant source citations.</p>
+              )
             ) : (
               activeCitations.map((c, i) => (
                 <div key={i} className="border border-gray-200 rounded-lg p-3">
                   <div className="flex items-center gap-2 mb-1">
-                    <span className="text-xs font-bold text-blue-800 bg-blue-50 w-5 h-5 rounded-full flex items-center justify-center">{i + 1}</span>
+                    <span className="text-xs font-bold text-blue-800 bg-blue-50 w-5 h-5 rounded-full flex items-center justify-center">{c.number ?? (i + 1)}</span>
                     <span className="text-xs font-medium text-gray-700 truncate">{c.document_name}</span>
                   </div>
                   {c.page_ref && <p className="text-xs text-gray-400 mb-1">p.{c.page_ref}</p>}

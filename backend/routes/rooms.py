@@ -1,5 +1,6 @@
 from datetime import datetime
 from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 from database import get_db
 import models, schemas
@@ -18,12 +19,30 @@ def _check_expiry(room: models.Room, db: Session):
 @router.get("", response_model=list[schemas.RoomOut])
 def list_rooms(current_user: models.User = Depends(get_current_user), db: Session = Depends(get_db)):
     rooms = db.query(models.Room).filter(models.Room.sender_id == current_user.id).order_by(models.Room.created_at.desc()).all()
+    room_ids = [room.id for room in rooms]
+    if not room_ids:
+        return []
+
+    # Aggregate counts in two queries instead of loading every relationship row
+    doc_counts = dict(
+        db.query(models.Document.room_id, func.count(models.Document.id))
+        .filter(models.Document.room_id.in_(room_ids))
+        .group_by(models.Document.room_id)
+        .all()
+    )
+    member_counts = dict(
+        db.query(models.RoomMember.room_id, func.count(models.RoomMember.id))
+        .filter(models.RoomMember.room_id.in_(room_ids), models.RoomMember.status != "revoked")
+        .group_by(models.RoomMember.room_id)
+        .all()
+    )
+
     result = []
     for room in rooms:
         _check_expiry(room, db)
         r = schemas.RoomOut.model_validate(room)
-        r.document_count = len(room.documents)
-        r.member_count = len([m for m in room.members if m.status != "revoked"])
+        r.document_count = doc_counts.get(room.id, 0)
+        r.member_count = member_counts.get(room.id, 0)
         result.append(r)
     return result
 

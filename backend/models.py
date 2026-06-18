@@ -65,8 +65,11 @@ class RoomMember(Base):
     name = Column(String, nullable=True)
     invite_token = Column(String, unique=True, nullable=False)
     verification_code = Column(String, nullable=True)
+    code_expires_at = Column(DateTime, nullable=True)
+    verification_attempts = Column(Integer, default=0)
     status = Column(String, default="invited")  # invited | verified | accepted | revoked
     session_token = Column(String, nullable=True, unique=True)
+    session_expires_at = Column(DateTime, nullable=True)
     invited_at = Column(DateTime, default=datetime.utcnow)
     verified_at = Column(DateTime, nullable=True)
     accepted_at = Column(DateTime, nullable=True)
