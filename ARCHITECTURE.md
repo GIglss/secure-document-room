@@ -23,7 +23,7 @@ The backend runs on port 8000. The frontend runs on port 3000 and proxies all `/
 
 ### Entry point
 
-`backend/main.py` — creates the FastAPI application, registers CORS middleware, mounts all routers under `/api`, and on startup creates DB tables and the `uploads/` and `data/chroma/` directories.
+`backend/main.py` — creates the FastAPI application, registers CORS middleware, mounts all routers under `/api`. On startup (lifespan) it validates security-critical config, creates DB tables and the `uploads/` and `data/chroma/` directories, warms the embedding model, and re-indexes any documents left `indexed=false` by a prior crash or older code (self-heal, with per-document logging).
 
 ### Layers
 
@@ -72,7 +72,8 @@ Manages the vector store and LLM inference:
 - One collection per room: `room_{room_id_with_underscores}`
 - Embeddings: ChromaDB `DefaultEmbeddingFunction` (all-MiniLM-L6-v2, runs locally)
 - Retrieval: top-5 cosine similarity chunks for each question
-- Generation: Anthropic `claude-sonnet-4-6` with a strict system prompt that forbids verbatim reproduction, requires citation notation, and mandates graceful uncertainty signaling
+- Generation: pluggable provider (`LLM_PROVIDER`) — Anthropic `claude-sonnet-4-6` (cloud) or a local MLX model via `mlx_lm.server` (`_call_mlx`, OpenAI-compatible, reasoning-mode disabled for direct answers). Strict system prompt forbids verbatim reproduction, requires citation notation, and mandates graceful uncertainty signaling
+- Grounding: `_ground_answer()` returns only the `[N]` sources actually cited and flags ungroundable answers `grounded=false`
 
 **`services/audit_service.py`**
 Single function `log_event()` — inserts a row into `audit_logs`. Never updates or deletes rows. Called from every route that mutates state or serves Q&A.

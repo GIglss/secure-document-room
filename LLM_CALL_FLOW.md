@@ -54,9 +54,12 @@ services/rag_engine.py → answer_question(room_id, question)
   │       max_tokens: 1024                           model: MLX_MODEL
   │       system= SYSTEM_PROMPT                              (default: mlx-community/Qwen3.5-4B-MLX-4bit)
   │       messages: [{role:user, content:…}]         api_key: "not-required"
-  │       → message.content[0].text                  messages: [system, user]
-  │                                                   stream: false
-  │                                                 → choices[0].message.content
+  │       (placeholder "your-" key →                 max_tokens: MLX_MAX_TOKENS (default 1024)
+  │        ValueError, actionable msg)               extra_body: enable_thinking=False
+  │       → message.content[0].text                          (MLX_DISABLE_THINKING, default true)
+  │                                                   messages: [system, user], stream: false
+  │                                                 → _strip_think(choices[0].message.content)
+  │                                                   (fallback to .reasoning if content empty)
   │
   └─ 4. Return
         answer_text (raw model output)
@@ -150,8 +153,21 @@ Please answer based only on the above context, with appropriate citations.
 | `ANTHROPIC_MODEL` | `claude-sonnet-4-6` | Any Anthropic model ID |
 | `MLX_BASE_URL` | `http://localhost:8080/v1` | MLX server OpenAI-compatible endpoint |
 | `MLX_MODEL` | `mlx-community/Qwen3.5-4B-MLX-4bit` | Any HuggingFace MLX model ID |
+| `MLX_MAX_TOKENS` | `1024` | Max tokens for the generated answer |
+| `MLX_DISABLE_THINKING` | `true` | Suppress reasoning-model `<think>` channel (see below) |
 
 The active config (provider + model, no keys) is exposed at `GET /api/llm-config` and displayed as a badge in the Q&A interface header (green "Local MLX · Qwen3.5-4B-MLX-4bit" vs blue "Cloud · claude-sonnet-4-6").
+
+### Reasoning models (Qwen3 and similar)
+
+Reasoning-tuned models emit a hidden `<think>` / `reasoning` channel before the answer. With `mlx_lm.server`'s default 512-token cap, Qwen3 spent the **entire budget thinking** (`finish_reason: length`) and returned an **empty `content`** — surfacing as "Unable to generate answer."
+
+`_call_mlx()` mitigates this for the extraction-style RAG task:
+1. **Disables thinking** via `extra_body={"chat_template_kwargs": {"enable_thinking": False}}` (`MLX_DISABLE_THINKING=true`), so the model answers directly into `content`.
+2. **Sets `max_tokens`** explicitly (`MLX_MAX_TOKENS`, default 1024) so a full answer isn't truncated.
+3. **`_strip_think()`** removes any leaked `<think>…</think>` block, and if `content` is still empty it falls back to the `reasoning` channel.
+
+To keep a model's reasoning enabled, set `MLX_DISABLE_THINKING=false` and raise `MLX_MAX_TOKENS` (e.g. 2048+) so thinking plus the answer both fit.
 
 ### Using MLX
 
@@ -174,15 +190,18 @@ Restart the backend. The Q&A interface will show a green **"Local MLX · Qwen3.5
 
 ## Failure modes
 
+`routes/qa.py` wraps `answer_question()` so provider failures return a **handled** response that carries CORS headers and a readable `detail` — without the wrapper, an unhandled 500 skips CORS headers and the browser shows a generic "Failed to fetch" instead of the real reason.
+
 | Scenario | Provider | Behavior |
 |----------|----------|---------|
 | No documents indexed in room | both | Returns hardcoded message; no LLM call made |
 | ChromaDB returns no results | both | Returns "couldn't find relevant information"; no LLM call made |
-| `ANTHROPIC_API_KEY` not set | anthropic | Raises `ValueError` with clear message; HTTP 500 |
-| Anthropic rate limit / API error | anthropic | Exception propagates; HTTP 500 with detail |
-| MLX server not running | mlx | `openai.APIConnectionError`; HTTP 500 — run `./start.sh` in `local-ai/mlx` |
-| Model not loaded in MLX server | mlx | Server returns error; HTTP 500 — restart server with correct `--model` |
-| LLM returns empty content | both | Falls back to `"Unable to generate answer."` |
+| `ANTHROPIC_API_KEY` missing / placeholder (`your-…`) | anthropic | `ValueError` → **HTTP 503** with actionable message ("set a real key, or `LLM_PROVIDER=mlx`") |
+| Anthropic rate limit / API error | anthropic | **HTTP 502** `AI provider error: …` (CORS-safe) |
+| MLX server not running | mlx | `openai.APIConnectionError` → **HTTP 502** — run `./start.sh` in `local-ai/mlx` |
+| Model not loaded in MLX server | mlx | Server error → **HTTP 502** — restart server with correct `--model` |
+| Reasoning model returns empty `content` | mlx | Thinking disabled + `_strip_think()`/reasoning fallback; only "Unable to generate answer." if truly empty |
+| Q&A rate limit exceeded | both | **HTTP 429** before any LLM call |
 
 ---
 

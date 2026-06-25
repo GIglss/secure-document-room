@@ -100,8 +100,11 @@ def _call_anthropic(user_message: str) -> str:
     from anthropic import Anthropic
 
     api_key = os.getenv("ANTHROPIC_API_KEY", "")
-    if not api_key:
-        raise ValueError("ANTHROPIC_API_KEY is not set in the environment")
+    if not api_key or api_key.startswith("your-"):
+        raise ValueError(
+            "ANTHROPIC_API_KEY is not configured. Set a real key in backend/.env, "
+            "or set LLM_PROVIDER=mlx to use a local model."
+        )
 
     model = os.getenv("ANTHROPIC_MODEL", "claude-sonnet-4-6")
     client = Anthropic(api_key=api_key)
@@ -114,11 +117,23 @@ def _call_anthropic(user_message: str) -> str:
     return message.content[0].text if message.content else "Unable to generate answer."
 
 
+def _strip_think(text: str) -> str:
+    """Remove <think>...</think> reasoning blocks some models leak into content."""
+    return re.sub(r"<think>.*?</think>", "", text or "", flags=re.DOTALL).strip()
+
+
 def _call_mlx(user_message: str) -> str:
     from openai import OpenAI
 
     base_url = os.getenv("MLX_BASE_URL", "http://localhost:8080/v1")
     model = os.getenv("MLX_MODEL", "mlx-community/Qwen3.5-4B-MLX-4bit")
+    max_tokens = int(os.getenv("MLX_MAX_TOKENS", "1024"))
+    disable_thinking = os.getenv("MLX_DISABLE_THINKING", "true").lower() in ("1", "true", "yes")
+
+    # Reasoning models (Qwen3, etc.) otherwise spend the whole token budget in a
+    # <think>/reasoning channel and leave the answer content empty. For this
+    # extraction-style RAG task we want a direct answer.
+    extra_body = {"chat_template_kwargs": {"enable_thinking": False}} if disable_thinking else {}
 
     client = OpenAI(base_url=base_url, api_key="not-required")
     response = client.chat.completions.create(
@@ -127,9 +142,17 @@ def _call_mlx(user_message: str) -> str:
             {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": user_message},
         ],
+        max_tokens=max_tokens,
         stream=False,
+        extra_body=extra_body,
     )
-    return response.choices[0].message.content or "Unable to generate answer."
+
+    msg = response.choices[0].message
+    content = _strip_think(msg.content or "")
+    if not content:
+        # Fallback: some servers/models emit only into a reasoning channel.
+        content = _strip_think(getattr(msg, "reasoning", None) or "")
+    return content or "Unable to generate answer."
 
 
 def _call_llm(user_message: str) -> str:

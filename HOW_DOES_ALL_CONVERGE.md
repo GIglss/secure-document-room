@@ -84,11 +84,14 @@ The frontend proxies all `/api/*` requests to the backend via `next.config.ts` r
    services/rag_engine.py:
      → ChromaDB query: top-5 chunks by cosine similarity
      → builds context string with [1]..[5] citations
-     → Anthropic API: claude-sonnet-4-6 with containment system prompt
-     → returns { answer, citations }
+     → LLM (LLM_PROVIDER): Anthropic claude-sonnet-4-6  OR  local MLX model
+       with containment system prompt
+     → grounding: return only the [N] sources actually cited (grounded flag)
+     → returns { answer, citations, grounded }
 
    → logs to audit_logs: event_type="question_asked"
-   → HTTP 200: { answer, citations, question_id }
+   → HTTP 200: { answer, citations, grounded, question_id }
+   (provider/config failure → handled 502/503 with CORS, readable detail)
 
    frontend: renders answer in chat + citations in right panel
 ```
@@ -155,7 +158,7 @@ frontend/
 
 **ChromaDB collection per room** — each room's document chunks are stored in an isolated ChromaDB collection (`room_{uuid}`). This ensures retrieval for room A cannot surface content from room B, and deleting a room's data is a single `client.delete_collection()` call.
 
-**Background indexing** — document upload is non-blocking. The file is saved and the API returns immediately. ChromaDB indexing happens in a FastAPI `BackgroundTasks` job. The `Document.indexed` flag tracks whether a document is queryable yet.
+**Background indexing** — document upload is non-blocking. The file is saved and the API returns immediately. ChromaDB indexing happens in a FastAPI `BackgroundTasks` job. The `Document.indexed` flag tracks whether a document is queryable yet; a failure is recorded in `Document.index_error`. On startup the backend re-indexes any document left `indexed=false` (self-heal), so a crash mid-index doesn't strand a document on "Processing" forever.
 
 ---
 

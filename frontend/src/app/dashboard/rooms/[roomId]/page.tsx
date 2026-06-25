@@ -28,8 +28,19 @@ export default function RoomDetail() {
   const [inviteResult, setInviteResult] = useState<any>(null);
   const [inviting, setInviting] = useState(false);
   const [error, setError] = useState("");
+  const [copied, setCopied] = useState<string>("");
+  const [indexStalled, setIndexStalled] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const auditIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  const copyLink = (link: string, key: string) => {
+    navigator.clipboard.writeText(link);
+    setCopied(key);
+    setTimeout(() => setCopied(""), 2000);
+  };
+
+  const inviteLinkFor = (token: string) =>
+    `${typeof window !== "undefined" ? window.location.origin : ""}/join/${token}`;
 
   const loadRoom = useCallback(async () => {
     try {
@@ -51,6 +62,23 @@ export default function RoomDetail() {
     }
     return () => { if (auditIntervalRef.current) clearInterval(auditIntervalRef.current); };
   }, [tab, roomId]);
+
+  // Poll for indexing completion while any document is still processing.
+  // Indexing runs server-side in the background after upload, so the list must
+  // be re-fetched until every document reports indexed=true.
+  useEffect(() => {
+    const anyProcessing = docs.some((d) => !d.indexed && !d.index_error);
+    if (!anyProcessing) { setIndexStalled(false); return; }
+    const startedAt = Date.now();
+    const interval = setInterval(async () => {
+      try {
+        setDocs(await getDocuments(roomId));
+      } catch { /* keep polling */ }
+      // If still processing after 25s, something is wrong server-side.
+      if (Date.now() - startedAt > 25000) setIndexStalled(true);
+    }, 2000);
+    return () => clearInterval(interval);
+  }, [docs, roomId]);
 
   const handleFileUpload = async (file: File) => {
     setUploading(true); setError("");
@@ -180,9 +208,38 @@ export default function RoomDetail() {
                 </>
               )}
             </div>
-            <div className="bg-blue-50 border border-blue-100 rounded-lg px-4 py-3 text-xs text-blue-700 mb-6">
-              Documents are processed and indexed for AI Q&A. Raw files are never accessible to recipients.
-            </div>
+            {/* Readiness banner */}
+            {docs.length > 0 && (
+              docs.some((d) => !d.indexed && !d.index_error) ? (
+                indexStalled ? (
+                  <div className="bg-red-50 border border-red-200 rounded-lg px-4 py-3 text-xs text-red-800 mb-6">
+                    Indexing is taking longer than expected. This usually means the backend hit an error
+                    while processing the file. Check the backend terminal for an <code className="bg-red-100 px-1 rounded">Indexing error</code> /
+                    <code className="bg-red-100 px-1 rounded">FAIL</code> line, then restart the backend (it re-indexes pending documents on startup),
+                    or remove and re-upload the file.
+                  </div>
+                ) : (
+                  <div className="bg-yellow-50 border border-yellow-200 rounded-lg px-4 py-3 text-xs text-yellow-800 mb-6 flex items-center gap-2">
+                    <span className="inline-block w-3 h-3 border-2 border-yellow-500 border-t-transparent rounded-full animate-spin" />
+                    Indexing documents for AI Q&A — this updates automatically, no need to refresh.
+                  </div>
+                )
+              ) : docs.some((d) => d.index_error) ? (
+                <div className="bg-red-50 border border-red-200 rounded-lg px-4 py-3 text-xs text-red-800 mb-6">
+                  Some documents could not be indexed (see the error under each file below). Remove and
+                  re-upload them, or upload a text-based version. Indexed documents are still usable for Q&A.
+                </div>
+              ) : (
+                <div className="bg-green-50 border border-green-200 rounded-lg px-4 py-3 text-xs text-green-800 mb-6">
+                  All documents are indexed. Recipients can now ask questions in the room.
+                </div>
+              )
+            )}
+            {docs.length === 0 && (
+              <div className="bg-blue-50 border border-blue-100 rounded-lg px-4 py-3 text-xs text-blue-700 mb-6">
+                Documents are processed and indexed for AI Q&A. Raw files are never accessible to recipients.
+              </div>
+            )}
             {docs.length === 0 ? (
               <p className="text-gray-400 text-sm text-center py-8">No documents uploaded yet.</p>
             ) : (
@@ -193,10 +250,24 @@ export default function RoomDetail() {
                       <div className="flex items-center gap-2 mb-0.5">
                         <span className="font-medium text-sm">{doc.original_filename}</span>
                         <span className="text-xs bg-gray-100 text-gray-600 px-1.5 py-0.5 rounded uppercase">{doc.file_type}</span>
-                        <span className={`text-xs px-1.5 py-0.5 rounded ${doc.indexed ? "bg-green-100 text-green-700" : "bg-yellow-100 text-yellow-700"}`}>
-                          {doc.indexed ? `${doc.chunks_count} chunks indexed` : "Processing..."}
-                        </span>
+                        {doc.indexed ? (
+                          <span className="text-xs px-1.5 py-0.5 rounded bg-green-100 text-green-700">
+                            Ready · {doc.chunks_count} chunks
+                          </span>
+                        ) : doc.index_error ? (
+                          <span className="text-xs px-1.5 py-0.5 rounded bg-red-100 text-red-700">
+                            Indexing failed
+                          </span>
+                        ) : (
+                          <span className="text-xs px-1.5 py-0.5 rounded bg-yellow-100 text-yellow-700 flex items-center gap-1">
+                            <span className="inline-block w-2.5 h-2.5 border-2 border-yellow-500 border-t-transparent rounded-full animate-spin" />
+                            Processing…
+                          </span>
+                        )}
                       </div>
+                      {doc.index_error && !doc.indexed && (
+                        <p className="text-xs text-red-600 mt-1 max-w-md">{doc.index_error}</p>
+                      )}
                       <span className="text-xs text-gray-400">{(doc.file_size / 1024).toFixed(1)} KB · {new Date(doc.created_at).toLocaleDateString()}</span>
                     </div>
                     <button onClick={() => handleDeleteDoc(doc.id, doc.original_filename)}
@@ -226,11 +297,13 @@ export default function RoomDetail() {
               </form>
               {inviteResult && (
                 <div className="mt-4 bg-green-50 border border-green-200 rounded-lg p-3">
-                  <p className="text-sm font-medium text-green-800 mb-1">Invite created!</p>
+                  <p className="text-sm font-medium text-green-800 mb-1">Invite created — share this link with the recipient:</p>
                   <div className="flex items-center gap-2">
                     <input readOnly value={inviteResult.invite_link} className="text-xs text-gray-600 bg-white border border-gray-200 rounded px-2 py-1 flex-1" />
-                    <button onClick={() => navigator.clipboard.writeText(inviteResult.invite_link)}
-                      className="text-xs bg-green-100 text-green-700 px-2 py-1 rounded hover:bg-green-200">Copy</button>
+                    <button onClick={() => copyLink(inviteResult.invite_link, "new")}
+                      className="text-xs bg-green-100 text-green-700 px-2 py-1 rounded hover:bg-green-200 w-16">
+                      {copied === "new" ? "Copied!" : "Copy"}
+                    </button>
                   </div>
                 </div>
               )}
@@ -259,9 +332,17 @@ export default function RoomDetail() {
                         <td className="px-4 py-3 text-gray-400 text-xs">{new Date(m.invited_at).toLocaleDateString()}</td>
                         <td className="px-4 py-3 text-gray-400 text-xs">{m.accepted_at ? new Date(m.accepted_at).toLocaleDateString() : "—"}</td>
                         <td className="px-4 py-3">
-                          {m.status !== "revoked" && (
-                            <button onClick={() => handleRevoke(m.id)} className="text-red-400 hover:text-red-600 text-xs">Revoke</button>
-                          )}
+                          <div className="flex items-center gap-3 justify-end">
+                            {m.status !== "revoked" && m.status !== "accepted" && (
+                              <button onClick={() => copyLink(inviteLinkFor(m.invite_token), m.id)}
+                                className="text-blue-600 hover:text-blue-800 text-xs">
+                                {copied === m.id ? "Copied!" : "Copy link"}
+                              </button>
+                            )}
+                            {m.status !== "revoked" && (
+                              <button onClick={() => handleRevoke(m.id)} className="text-red-400 hover:text-red-600 text-xs">Revoke</button>
+                            )}
+                          </div>
                         </td>
                       </tr>
                     ))}

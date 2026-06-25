@@ -69,6 +69,7 @@ class DocumentOut(BaseModel):
     file_size: int
     chunks_count: int
     indexed: bool
+    index_error: Optional[str] = None
     created_at: datetime
 
     class Config:
@@ -87,6 +88,7 @@ class MemberOut(BaseModel):
     email: str
     name: Optional[str]
     status: str
+    invite_token: str
     invited_at: datetime
     verified_at: Optional[datetime]
     accepted_at: Optional[datetime]

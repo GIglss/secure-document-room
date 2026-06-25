@@ -43,14 +43,35 @@ def _index_in_background(doc_id: str, room_id: str, doc_name: str, file_path: st
     db = SessionLocal()
     try:
         chunks = process_document(file_path, file_type)
+        if not chunks:
+            doc = db.query(models.Document).filter(models.Document.id == doc_id).first()
+            if doc:
+                doc.indexed = False
+                doc.chunks_count = 0
+                doc.index_error = (
+                    "No extractable text found. If this is a scanned or image-only "
+                    "PDF, it must be OCR'd before upload."
+                )
+                db.commit()
+            print(f"Indexing produced 0 chunks for doc {doc_id} ({doc_name})")
+            return
         count = index_document(room_id, doc_id, doc_name, chunks)
         doc = db.query(models.Document).filter(models.Document.id == doc_id).first()
         if doc:
             doc.indexed = True
             doc.chunks_count = count
+            doc.index_error = None
             db.commit()
     except Exception as e:
         print(f"Indexing error for doc {doc_id}: {e}")
+        try:
+            doc = db.query(models.Document).filter(models.Document.id == doc_id).first()
+            if doc:
+                doc.indexed = False
+                doc.index_error = f"{type(e).__name__}: {e}"
+                db.commit()
+        except Exception:
+            db.rollback()
     finally:
         db.close()
 

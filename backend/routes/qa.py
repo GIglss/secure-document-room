@@ -68,7 +68,15 @@ def ask_question(
             detail="Rate limit exceeded. Please wait before asking another question.",
         )
 
-    result = answer_question(room_id, payload.question)
+    try:
+        result = answer_question(room_id, payload.question)
+    except ValueError as e:
+        # Misconfiguration (e.g. missing/placeholder API key) — actionable message
+        raise HTTPException(status_code=503, detail=str(e))
+    except Exception as e:
+        # Provider/network failure — return a handled error so it carries CORS
+        # headers and the client sees the reason instead of "Failed to fetch"
+        raise HTTPException(status_code=502, detail=f"AI provider error: {e}")
     question_id = str(uuid.uuid4())
 
     log_event(

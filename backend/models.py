@@ -51,6 +51,7 @@ class Document(Base):
     file_path = Column(String, nullable=False)
     chunks_count = Column(Integer, default=0)
     indexed = Column(Boolean, default=False)
+    index_error = Column(Text, nullable=True)  # set if extraction/indexing failed
     created_at = Column(DateTime, default=datetime.utcnow)
 
     room = relationship("Room", back_populates="documents")

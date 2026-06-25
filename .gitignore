@@ -27,3 +27,6 @@ frontend/tsconfig.tsbuildinfo
 # Editor
 .idea/
 .vscode/
+
+# Local preview tooling
+.claude/

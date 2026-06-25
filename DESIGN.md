@@ -184,6 +184,26 @@ Records product and engineering decisions made during the MVP build. Each entry 
 
 ---
 
+### D-115 · Disable reasoning mode for the local MLX model
+
+**Decision:** `_call_mlx()` disables the model's reasoning channel (`chat_template_kwargs.enable_thinking=False`, via `MLX_DISABLE_THINKING`, default true) and sets an explicit `MLX_MAX_TOKENS` (default 1024). It also strips any leaked `<think>…</think>` and falls back to the `reasoning` field if `content` is empty.
+
+**Rationale:** Qwen3-class models emit a hidden `<think>` channel before answering. With `mlx_lm.server`'s default 512-token cap, the model consumed the entire budget thinking (`finish_reason: length`) and returned an empty `content` — surfacing to users as "Unable to generate answer." For an extraction-style RAG task the reasoning trace adds latency and token cost without improving short factual answers, so disabling it is the right default.
+
+**When to revisit:** If retrieval-heavy multi-hop questions need deliberate reasoning, set `MLX_DISABLE_THINKING=false` and raise `MLX_MAX_TOKENS` so thinking and the answer both fit.
+
+---
+
+### D-116 · Self-healing document indexing
+
+**Decision:** On startup the backend re-processes any document still marked `indexed=false` (per-document `OK`/`FAIL`/`SKIP` logging), and a failed extraction/index is recorded in `Document.index_error` rather than left silent. The frontend polls until indexed and shows a stalled hint after 25s.
+
+**Rationale:** Indexing runs in a background task after upload; if the process crashed mid-index or the document was uploaded under older/broken code, it stayed `indexed=false` forever and the UI spun on "Processing" with no recourse. Self-heal on restart plus a recorded error makes the failure observable and recoverable.
+
+**When to revisit:** Moving indexing to a dedicated worker queue (per D-103) — the re-index pass would become a queue replay instead.
+
+---
+
 ## Open decisions (from handoff brief)
 
 These are unresolved and should be addressed before Phase 2 design partner onboarding:

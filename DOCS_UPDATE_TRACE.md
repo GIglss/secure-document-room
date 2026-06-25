@@ -1,3 +1,42 @@
+# Documentation Update Trace — Integration Fixes: MLX Q&A, Indexing Self-Heal, Q&A Error Surfacing
+
+> Generated June 17, 2026.
+> Purpose: Records live-testing bug fixes that make the stack work end-to-end on a local MLX model — the Q&A "Failed to fetch" / empty-answer issues, the "document stuck on Processing" issue, and the supporting UX.
+> Status: **APPLIED** (code) — June 17, 2026. **Not yet committed** — commit + push deferred per request.
+
+---
+
+## What Changed in the Codebase
+
+### Modified files
+
+**LLM provider — local MLX**
+- `backend/services/rag_engine.py` — `_call_mlx()` now disables reasoning-model thinking (`extra_body={"chat_template_kwargs": {"enable_thinking": False}}`) and sets `max_tokens` (`MLX_MAX_TOKENS`, default 1024). Root cause: Qwen3 spent the entire default 512-token budget in a `reasoning`/`<think>` channel (`finish_reason: length`), leaving `content` empty → "Unable to generate answer." Added `_strip_think()` and a reasoning-channel fallback. `_call_anthropic()` now detects the placeholder key (`startswith("your-")`) and raises an actionable error.
+- `backend/.env.example` — switched documentation to MLX-first; added `MLX_MAX_TOKENS` and `MLX_DISABLE_THINKING` knobs. (Live `backend/.env` set to `LLM_PROVIDER=mlx`, `MLX_MODEL=mlx-community/Qwen3.5-4B-MLX-4bit`; `.env` is gitignored.)
+
+**Q&A error surfacing**
+- `backend/routes/qa.py` — wraps `answer_question()` in try/except → `503` for config errors (missing/placeholder key) and `502` for provider/network failures. Unhandled 500s skip CORS headers, so the browser saw a generic "Failed to fetch"; handled exceptions carry CORS headers and a readable `detail`.
+
+**Document indexing — self-heal + visibility**
+- `backend/main.py` — startup `_reindex_pending_documents()` re-processes any `indexed=false` documents on boot with per-document `OK`/`FAIL`/`SKIP` logging (fixes documents left stuck by a prior crash/old code); warms the embedding model at startup so the first upload doesn't pay the load cost mid-request.
+- `backend/models.py` / `backend/schemas.py` — `Document.index_error` (+ `DocumentOut.index_error`) so a failed extraction/index is recorded and visible instead of spinning forever.
+
+**Frontend UX**
+- `frontend/src/app/dashboard/rooms/[roomId]/page.tsx` — polls the document list every 2s until all docs report `indexed=true` (fixes "stuck on Processing — updates automatically" never updating); readiness banner (indexing / all-indexed / stalled-after-25s with an actionable hint); per-member invite-link re-copy with "Copied!" feedback.
+- `backend/schemas.py` — `MemberOut.invite_token` exposed so the sender can re-copy a recipient's join link.
+
+## Documentation Changes
+
+| File | What was updated |
+|------|-----------------|
+| `ARCHITECTURE.md` | Startup lifespan now lists config validation, embedding warm-up, and self-heal re-index; `rag_engine` generation described as provider-pluggable (Anthropic / local MLX) + grounding |
+| `DESIGN.md` | Added D-115 (disable MLX reasoning mode) and D-116 (self-healing document indexing) |
+| `LLM_CALL_FLOW.md` | MLX branch documents `enable_thinking=False` + `MLX_MAX_TOKENS` + `_strip_think`/reasoning fallback; new reasoning-models subsection; config table adds the two MLX knobs; failure-modes table rewritten to handled 502/503 (CORS-safe) + 429 |
+| `HOW_DOES_ALL_CONVERGE.md` | Q&A flow shows provider choice + grounding + handled error path; background-indexing concept notes `index_error` and startup self-heal |
+| `README.md` | No changes |
+
+---
+
 # Documentation Update Trace — Hardening Pass: Security, RAG Grounding, Efficiency
 
 > Generated June 17, 2026.
