@@ -1,0 +1,12 @@
+# GPU override — use ONLY on VMs with an NVIDIA GPU + nvidia-container-toolkit
+# (e.g. Standard_NC8as_T4_v3 provisioned with infra/cloud-init-gpu.yaml):
+#   docker compose -f docker-compose.prod.yml -f docker-compose.gpu.yml up -d --build
+services:
+  ollama:
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]

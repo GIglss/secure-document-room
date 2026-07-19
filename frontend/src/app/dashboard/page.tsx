@@ -80,9 +80,14 @@ export default function Dashboard() {
       <div className="max-w-5xl mx-auto px-6 py-8">
         <div className="flex items-center justify-between mb-8">
           <h1 className="text-2xl font-semibold text-gray-900">Secure Rooms</h1>
-          <button onClick={() => setShowCreate(!showCreate)} className="bg-blue-800 text-white px-4 py-2 rounded-lg text-sm font-medium hover:bg-blue-900 transition">
-            + Create New Room
-          </button>
+          <div className="flex items-center gap-3">
+            <Link href="/insights" className="bg-white border border-blue-200 text-blue-800 px-4 py-2 rounded-lg text-sm font-medium hover:bg-blue-50 transition">
+              View Insights
+            </Link>
+            <button onClick={() => setShowCreate(!showCreate)} className="bg-blue-800 text-white px-4 py-2 rounded-lg text-sm font-medium hover:bg-blue-900 transition">
+              + Create New Room
+            </button>
+          </div>
         </div>
 
         {/* Create form */}

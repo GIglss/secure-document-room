@@ -1,7 +1,7 @@
 "use client";
 import { useState, useEffect } from "react";
 import { useRouter, useParams } from "next/navigation";
-import { getJoinInfo, verifyEmail, confirmCode, acceptTerms } from "@/lib/api";
+import { getJoinInfo, verifyEmail, confirmCode, acceptTerms, type SharingMode } from "@/lib/api";
 
 type Step = "info" | "verify" | "confirm" | "terms";
 
@@ -21,6 +21,7 @@ export default function JoinPage() {
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState("");
   const [agreed, setAgreed] = useState(false);
+  const [sharingMode, setSharingMode] = useState<SharingMode>("anonymized");
 
   useEffect(() => {
     getJoinInfo(token)
@@ -57,9 +58,10 @@ export default function JoinPage() {
     if (!agreed) { setError("You must agree to the terms to enter."); return; }
     setSubmitting(true); setError("");
     try {
-      await acceptTerms(token, sessionToken);
+      await acceptTerms(token, sessionToken, sharingMode);
       sessionStorage.setItem("sdr_session", sessionToken);
       sessionStorage.setItem("sdr_room_id", roomId);
+      sessionStorage.setItem("sdr_sharing_mode", sharingMode);
       router.push(`/room/${roomId}`);
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : "Failed to accept terms");
@@ -108,7 +110,7 @@ export default function JoinPage() {
         {step === "info" && (
           <div>
             <div className="bg-blue-50 border border-blue-100 rounded-lg p-4 mb-6 text-sm text-blue-800">
-              This room uses a secure AI Q&A environment. Documents are indexed and never downloaded. Your interactions are logged in an immutable audit trail.
+              In this room you can view and download the shared documents and ask AI questions about them. Your questions are processed by a local AI model inside an isolated sandbox that is destroyed after your engagement. Your interactions are logged in an immutable audit trail.
             </div>
             <form onSubmit={handleVerify} className="space-y-4">
               <div>
@@ -168,6 +170,34 @@ export default function JoinPage() {
               <label htmlFor="agree" className="text-sm text-gray-700 cursor-pointer">
                 I understand and agree to these terms. I acknowledge that my interactions will be logged.
               </label>
+            </div>
+
+            {/* Sharing consent */}
+            <div className="border border-gray-200 rounded-lg p-4 mb-6">
+              <h3 className="text-sm font-medium text-gray-700 mb-1">What is shared with {roomInfo?.sender_name || "the company"}?</h3>
+              <p className="text-xs text-gray-400 mb-3">You can change this anytime from inside the room.</p>
+              <div className="space-y-3">
+                <label className="flex items-start gap-3 cursor-pointer">
+                  <input type="radio" name="sharing" checked={sharingMode === "anonymized"} onChange={() => setSharingMode("anonymized")}
+                    className="mt-0.5 h-4 w-4 border-gray-300 text-blue-800" />
+                  <span className="text-sm text-gray-700">
+                    <span className="font-medium">Share anonymized topics only</span>
+                    <span className="block text-xs text-gray-500 mt-0.5">
+                      Only question categories and topic labels are shared with {roomInfo?.sender_name || "the company"} — never your words or documents.
+                    </span>
+                  </span>
+                </label>
+                <label className="flex items-start gap-3 cursor-pointer">
+                  <input type="radio" name="sharing" checked={sharingMode === "full"} onChange={() => setSharingMode("full")}
+                    className="mt-0.5 h-4 w-4 border-gray-300 text-blue-800" />
+                  <span className="text-sm text-gray-700">
+                    <span className="font-medium">Share my full conversation</span>
+                    <span className="block text-xs text-gray-500 mt-0.5">
+                      Helps the company understand your needs; you can change this anytime.
+                    </span>
+                  </span>
+                </label>
+              </div>
             </div>
             <button onClick={handleAccept} disabled={submitting || !agreed}
               className="w-full bg-blue-800 text-white py-2.5 rounded-lg font-medium hover:bg-blue-900 transition disabled:opacity-60">

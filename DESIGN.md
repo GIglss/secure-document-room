@@ -114,11 +114,13 @@ Records product and engineering decisions made during the MVP build. Each entry 
 
 ---
 
-### D-107 · No document viewer — Q&A only for recipients
+### D-107 · No document viewer — Q&A only for recipients — ⚠️ SUPERSEDED by D-120 (v2)
 
 **Decision:** Recipients have no way to view, paginate, or browse documents. The only interface is the Q&A chat.
 
 **Rationale:** A document viewer, even a rendered PDF view, would expose raw content and create screenshot/print-to-PDF exfiltration vectors. The Q&A interface is the containment boundary. Future watermarked rendered views (post-MVP) would be an exception, designed specifically to embed recipient identity into every render.
+
+> **Reversed in v2 (D-120).** The product pivoted: the client is now *given* the document to read and download. The privacy guarantee moved from "hide the document" to "the model is local and the sandbox is destroyed." The containment boundary is now the ephemeral VM, not the browser.
 
 ---
 
@@ -204,15 +206,87 @@ Records product and engineering decisions made during the MVP build. Each entry 
 
 ---
 
+---
+
+## v2 decisions — sovereign ephemeral sandbox (2026-07-19)
+
+The v2 pivot reframes the product from a *sealed two-party document room* to a *per-client, disposable AI sandbox on Azure running a local model*. Terminology: **provider** = the company/clinic/bank (code: "sender"); **client** = the single invited individual (code: "recipient").
+
+### D-117 · One ephemeral VM per engagement, hard-deleted at the end
+
+**Decision:** Each client engagement runs on its own Azure VM (`Standard_E4s_v6`) spawned from a gold image; the VM (+ NIC, public IP, disk) is hard-deleted on explicit session close or after 15 minutes of inactivity, by an Azure Functions timer.
+
+**Rationale:** "The machine that held your data is destroyed" is a physical, demonstrable privacy guarantee — stronger than any contractual retention promise, and the core of the sales pitch. Per-VM isolation also means no shared runtime between clients (natural multi-tenancy) and bounds cost/blast-radius automatically.
+
+**Trade-offs:** ~5–6 min spawn latency; max 2 concurrent sandboxes under the 10-vCPU regional cap; provider accounts live in the VM's SQLite and die with it (see D-119).
+
+---
+
+### D-118 · Local model (llama.cpp + Qwen3-8B) as the default provider
+
+**Decision:** Default inference is llama.cpp serving Qwen3-8B (Q4_K_M GGUF) on the sandbox VM (`-t 4 --mlock --ctx-size 8192`), reached via its OpenAI-compatible endpoint. Anthropic and the legacy MLX path remain config switches. Weights are pre-baked into a CMK-encrypted gold image — never fetched at runtime.
+
+**Rationale:** Data sovereignty is the product. A local model means no document text ever leaves the isolated VM, which has no outbound internet except ACME. Baking weights into the image keeps the sandbox subnet fully egress-locked. `llama.cpp` generalizes the earlier MLX/Ollama work to any GGUF and any host (D-115 reasoning-mode handling still applies conceptually).
+
+**Alternative considered — Azure AI Foundry:** cheaper/faster, in-tenant with limited-retention terms, but a policy guarantee rather than a physical one. Kept as a one-env-var option for cost-sensitive engagements.
+
+**When to revisit:** GPU quota (currently 0) would allow a larger/faster model; publish it as a new gallery image version.
+
+---
+
+### D-119 · Analytics persist off-VM; personal content only with consent
+
+**Decision:** After each answered question, a background task classifies it into one of ten categories + a PII-free topic label and writes it to a control-plane Azure Table (`insights`) that survives VM destruction. Question/answer *text* is stored only when the client opted into `full` sharing (default is `anonymized`). A `sessions` table mirrors session state for the cleanup listener.
+
+**Rationale:** The provider needs durable demand intelligence ("what do clients worry about") to improve sales/service, but the client's privacy is the product. Anonymized-by-default categories give the provider signal without exposing personal content; explicit opt-in unlocks transcripts. Persisting off-VM is the only way analytics can outlive the deliberately-destroyed sandbox.
+
+**Implication:** Two new LLM call sites beyond Q&A (classification, and the appendix summary in D-121) — see `LLM_CALL_FLOW.md`. The classifier prompt must actively exclude names/companies/emails from the topic label.
+
+---
+
+### D-120 · Client can view and download the document (reverses D-107)
+
+**Decision:** The client can view the PDF in-browser (auth'd blob → iframe) and download it. PDF-only, ≤200 pages, ≤50 MB. Every view/download is audit-logged.
+
+**Rationale:** The v2 use case (a clinic/bank handing a client *their* document) requires the client to actually read it. With the containment boundary moved to the ephemeral VM (D-117), serving the file no longer breaks the privacy model — the file was always the client's to see.
+
+---
+
+### D-121 · Download with AI-generated conversation-summary appendix
+
+**Decision:** `GET .../file?with_appendix=1` returns the original PDF plus appended "Conversation Summary" pages: an LLM-written summary of the client's Q&A history followed by the verbatim question list with answer excerpts (reportlab + pypdf). If the model is unreachable, it falls back to the verbatim list; if appendix generation fails entirely, it serves the original PDF. The download never fails.
+
+**Rationale:** Gives the client a take-away record of their session that outlives the sandbox — useful, and reinforces the "you keep your data, we don't" story. Layered fallbacks keep a core action (getting your document) robust against model flakiness.
+
+---
+
+### D-122 · Real verification email via ACS (⚠️ deliverability open)
+
+**Decision:** When `ACS_CONNECTION_STRING` + `ACS_SENDER_ADDRESS` are set, verification codes are emailed via Azure Communication Services and never returned in the API response (superseding the D-105 dev-mock for production). Credentials are fetched at spawn time and injected via cloud-init, never baked into the image.
+
+**Rationale:** Real email is required for a real client onboarding; keeping the dev-mock behind absence-of-config preserves local testing.
+
+**⚠️ Open item:** `services/email_service.py` calls `begin_send` without awaiting the poller, so async delivery failures are silent — in live testing ACS accepted the message but it did not arrive. Must await `.result()`, surface status, and likely use a branded (SPF/DKIM) sender domain before first client. Supersedes the production half of D-105; the dev-mock half stands.
+
+---
+
+### D-123 · Same-origin frontend build for a reusable image
+
+**Decision:** The frontend is built with `NEXT_PUBLIC_API_URL="/"` so a single baked image serves every sandbox's unique FQDN via relative API calls; `src/lib/api.ts` uses `?? "http://localhost:8000"` (nullish, not `||`) plus a trailing-slash strip.
+
+**Rationale:** Next.js inlines `NEXT_PUBLIC_*` at build time and *drops empty-string* values, so `""` would silently fall back to localhost. The `/` convention gives same-origin behavior while keeping the localhost default for local dev — letting one gold image work for all sandboxes without a per-FQDN rebuild.
+
+---
+
 ## Open decisions (from handoff brief)
 
 These are unresolved and should be addressed before Phase 2 design partner onboarding:
 
-| # | Question | Why it matters |
-|---|----------|---------------|
-| OD-1 | Cloud LLM API vs. on-premise/confidential compute | Affects what the product can truthfully claim about data containment in sales conversations |
-| OD-2 | Who creates the room — seller, sell-side advisor, or either? | Shapes sales motion and pricing model |
-| OD-3 | Exact recipient terms legal text | The acceptance moment is the product's core legal mechanism; needs counsel review |
-| OD-4 | In-room redaction vs. pre-upload redaction | Significant UX vs. engineering trade-off |
-| OD-5 | Confidential compute partner (Tinfoil, Opaque, Anjuna) | Would enable cryptographically strong "no data leaves the room" claim |
-| OD-6 | Product name and the verb | Category creation depends on it; should come from design partner conversations |
+| # | Question | Why it matters | Status |
+|---|----------|---------------|--------|
+| OD-1 | Cloud LLM API vs. on-premise/confidential compute | Affects what the product can truthfully claim about data containment | **Resolved (v2):** local model on an ephemeral VM (D-118) is the default; Foundry/Anthropic a config switch |
+| OD-2 | Who creates the room — seller, sell-side advisor, or either? | Shapes sales motion and pricing model | Open |
+| OD-3 | Exact recipient terms legal text | The acceptance moment is the product's core legal mechanism; needs counsel review | Open (still placeholder) |
+| OD-4 | In-room redaction vs. pre-upload redaction | Significant UX vs. engineering trade-off | Open |
+| OD-5 | Confidential compute partner (Tinfoil, Opaque, Anjuna) | Would enable cryptographically strong "no data leaves the room" claim | Partially addressed: CMK image + egress-locked VM; confidential compute still future |
+| OD-6 | Product name and the verb | Category creation depends on it | Working name: **Confidant** |

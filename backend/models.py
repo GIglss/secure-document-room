@@ -49,6 +49,7 @@ class Document(Base):
     file_type = Column(String, nullable=False)  # pdf | docx | xlsx
     file_size = Column(Integer, nullable=False)
     file_path = Column(String, nullable=False)
+    scope = Column(String, default="room", nullable=False)  # room | knowledge
     chunks_count = Column(Integer, default=0)
     indexed = Column(Boolean, default=False)
     index_error = Column(Text, nullable=True)  # set if extraction/indexing failed
@@ -69,6 +70,7 @@ class RoomMember(Base):
     code_expires_at = Column(DateTime, nullable=True)
     verification_attempts = Column(Integer, default=0)
     status = Column(String, default="invited")  # invited | verified | accepted | revoked
+    sharing_mode = Column(String, default="anonymized", nullable=False)  # anonymized | full
     session_token = Column(String, nullable=True, unique=True)
     session_expires_at = Column(DateTime, nullable=True)
     invited_at = Column(DateTime, default=datetime.utcnow)
@@ -76,6 +78,43 @@ class RoomMember(Base):
     accepted_at = Column(DateTime, nullable=True)
 
     room = relationship("Room", back_populates="members")
+
+
+class QAInsight(Base):
+    """Anonymized analytics row produced after each successful Q&A answer.
+
+    question_text/answer_text are stored ONLY when the member consented with
+    sharing_mode="full" at the time the question was asked (snapshot semantics).
+    """
+    __tablename__ = "qa_insights"
+
+    id = Column(String, primary_key=True, default=gen_uuid)
+    room_id = Column(String, ForeignKey("rooms.id"), nullable=False, index=True)
+    member_id = Column(String, ForeignKey("room_members.id"), nullable=True)
+    category = Column(String, nullable=False)  # one of insights_service.CATEGORIES
+    topic_label = Column(String, nullable=False)  # 3-8 word anonymized label
+    sharing_mode = Column(String, nullable=False, default="anonymized")  # snapshot at ask time
+    question_text = Column(Text, nullable=True)  # only when sharing_mode == "full"
+    answer_text = Column(Text, nullable=True)  # only when sharing_mode == "full"
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
+class SessionActivity(Base):
+    """Lifecycle record for the recipient's session inside the ephemeral sandbox.
+
+    One row per room member. Mirrored (best-effort) to an Azure Table named
+    "sessions" so an external cleanup listener can destroy the sandbox when the
+    engagement ends or goes idle.
+    """
+    __tablename__ = "session_activity"
+
+    id = Column(String, primary_key=True, default=gen_uuid)
+    member_id = Column(String, ForeignKey("room_members.id"), unique=True, nullable=False)
+    room_id = Column(String, ForeignKey("rooms.id"), nullable=False)
+    sandbox_id = Column(String, nullable=True)
+    logged_in_at = Column(DateTime, nullable=True)
+    last_activity = Column(DateTime, nullable=True)
+    status = Column(String, default="active", nullable=False)  # active | closed
 
 
 class AuditLog(Base):

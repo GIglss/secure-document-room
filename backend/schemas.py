@@ -1,5 +1,5 @@
 from datetime import datetime
-from typing import Optional, List
+from typing import Optional, List, Literal
 from pydantic import BaseModel, EmailStr
 
 
@@ -67,6 +67,7 @@ class DocumentOut(BaseModel):
     original_filename: str
     file_type: str
     file_size: int
+    scope: str = "room"
     chunks_count: int
     indexed: bool
     index_error: Optional[str] = None
@@ -123,12 +124,24 @@ class ConfirmCodeRequest(BaseModel):
 
 class AcceptTermsRequest(BaseModel):
     session_token: str
+    sharing_mode: Optional[Literal["anonymized", "full"]] = None
 
 
 class SessionResponse(BaseModel):
     session_token: str
     room_id: str
     room_name: Optional[str] = None
+    sharing_mode: Optional[str] = None
+
+
+class SharingModeRequest(BaseModel):
+    session_token: str
+    sharing_mode: Literal["anonymized", "full"]
+
+
+class SharingModeResponse(BaseModel):
+    room_id: str
+    sharing_mode: str
 
 
 # Q&A
@@ -149,6 +162,37 @@ class QAResponse(BaseModel):
     citations: List[Citation]
     grounded: bool = True
     question_id: Optional[str] = None
+
+
+# Insights (company dashboard analytics)
+class CategoryCount(BaseModel):
+    category: str
+    count: int
+
+
+class TrendPoint(BaseModel):
+    date: str  # YYYY-MM-DD
+    count: int
+
+
+class TopicCount(BaseModel):
+    label: str
+    count: int
+
+
+class FullConversation(BaseModel):
+    room_name: str
+    asked_at: datetime
+    question: str
+    answer: str
+
+
+class InsightsResponse(BaseModel):
+    total_questions: int
+    by_category: List[CategoryCount]
+    trend: List[TrendPoint]
+    top_topics: List[TopicCount]
+    full_conversations: List[FullConversation]
 
 
 # Audit

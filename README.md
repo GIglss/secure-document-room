@@ -1,39 +1,39 @@
-# Secure Document Room
+# Confidant — Sovereign AI Sandbox
 
-A sealed, AI-powered document room for two-party sensitive document sharing. Upload confidential files, invite an external counterparty, and let them conduct AI-powered Q&A — without raw document content ever leaving the controlled environment.
+Hand a client a private, disposable AI workspace tied to a specific document and to your own expertise. They read the document and ask a **local** AI model questions with cited answers — nothing is ever sent to an external LLM provider, and the entire workspace is **destroyed** when the engagement ends.
 
-Built for M&A due diligence, legal document review, and any context where both sides need AI-assisted access to sensitive documents but neither can risk feeding them into a public model.
+Built for clinics, banks, and advisory firms whose clients cannot risk their documents being fed into a public model, but who still want self-service AI answers and a read of what their clients actually care about.
 
-> **Why now:** The February 2026 federal privilege-waiver ruling established that feeding privileged legal documents into a public AI model can constitute a disclosure sufficient to waive attorney-client privilege. This is a hard regulatory forcing function, not a reputational one.
+> **v2 (2026-07-19):** pivoted from a *sealed* document room to a *sovereign, ephemeral sandbox*. The client now **views and downloads** the document; the privacy guarantee is the **local model on an isolated VM that is deleted at engagement end**, not hiding the file. See [SPEC.md](SPEC.md) and [SAD.md](SAD.md).
 
 ---
 
 ## How it works
 
 ```
-Sender                                    Recipient
-──────                                    ─────────
-Creates room                              Receives invite link
-Uploads documents (PDF/DOCX/XLSX)         Verifies email
-Invites recipient by email                Accepts room terms
-                                          Asks questions in plain language
-Monitors audit log in real time  ←────→  Gets cited AI answers
-Revokes access at any time                (no raw document access)
-Exports immutable audit trail
+Provider (company/clinic/bank)              Client (single invited individual)
+──────────────────────────────             ───────────────────────────────────
+Creates room                                Receives invite link
+Uploads a PDF (or company knowledge)        Verifies email (code via ACS)
+Invites the client by email                 Accepts terms + chooses sharing mode
+Monitors audit log                          Reads / downloads the document
+Views persistent insights dashboard  ◄────  Asks the local model questions (cited)
+   (anonymized topics; full only            Downloads doc + conversation appendix
+    with client consent)                     Ends session → sandbox destroyed
 ```
 
-The AI engine lives **inside** the room. Recipients never see raw document text — only synthesized answers with citations. Every question asked is logged in an append-only audit trail visible to the sender.
+Each engagement runs on its **own Azure VM** spawned from a pre-baked gold image (llama.cpp + Qwen3-8B + the app, CMK-encrypted, zero runtime downloads). The VM sits in an egress-locked subnet, and an Azure Functions timer hard-deletes it on session close or 15 minutes of inactivity. Anonymized "what did clients ask about" analytics are mirrored to control-plane storage that **survives** the VM's destruction.
 
 ---
 
-## Features
+## Two-plane architecture
 
-- **Sealed environment** — no download buttons, no document viewer, no raw content served to the browser
-- **AI Q&A with citations** — answers grounded in retrieved document passages with source and page references
-- **Two-step recipient onboarding** — email verification + explicit terms acceptance before room entry
-- **Immutable audit log** — every access, question, and governance action logged; exportable as CSV
-- **Room governance** — expiry dates, per-recipient revocation, room closure
-- **Dual LLM support** — Anthropic cloud API or local MLX model (`mlx_lm.server`)
+| Plane | Where | Lifecycle | Contents |
+|---|---|---|---|
+| **Control plane** | `confidant-core-rg` | Persistent (~€7.5/mo idle) | Table Storage (insights + sessions), Functions (cleanup timer + provider dashboard), Key Vault + CMK, Compute Gallery (gold image), VNet |
+| **Sandbox** | `confidant-sandboxes-rg` | Ephemeral (~€0.29/h, one per client) | `E4s_v6` VM running Caddy + Next.js + FastAPI + llama.cpp + ChromaDB + SQLite |
+
+Full detail in [SAD.md](SAD.md) (Solution Architecture Document) and [ARCHITECTURE.md](ARCHITECTURE.md) (app internals).
 
 ---
 
@@ -41,195 +41,81 @@ The AI engine lives **inside** the room. Recipients never see raw document text 
 
 | Layer | Technology |
 |-------|-----------|
+| Reverse proxy / TLS | Caddy 2 (automatic ACME) |
+| Frontend | Next.js 14 · TypeScript · Tailwind (built same-origin) |
 | Backend | Python 3.12 · FastAPI · SQLite · SQLAlchemy |
 | Vector store | ChromaDB (persistent, local) · all-MiniLM-L6-v2 embeddings |
-| LLM | Anthropic `claude-sonnet-4-6` **or** local MLX via `mlx_lm.server` |
-| Document parsing | pypdf · python-docx · openpyxl |
-| Frontend | Next.js 14 · TypeScript · Tailwind CSS |
-| Auth | JWT (senders) · UUID session tokens (recipients) |
+| LLM | **Local llama.cpp · Qwen3-8B Q4_K_M** (default) · Anthropic / MLX as config switches |
+| Document parsing | pypdf · reportlab (appendix) |
+| Cloud | Azure: Compute Gallery + CMK, Functions, Table Storage, ACS Email, Bicep IaC |
+| Auth | JWT (providers) · URL-safe session tokens (clients) |
 
 ---
 
-## Quickstart
-
-### Prerequisites
-
-- Python 3.11+ with [uv](https://docs.astral.sh/uv/)
-- Node.js 18+
-- An Anthropic API key **or** a running MLX inference server
-
-### 1. Clone and configure
+## Operating it (the buttons — `infra/v2/`)
 
 ```bash
-git clone https://github.com/GIglss/secure-document-room
-cd secure-document-room
-
-cp backend/.env.example backend/.env
-# Edit backend/.env — set ANTHROPIC_API_KEY (or configure MLX below)
+./deploy-core.sh                 # stand up / update the persistent control plane
+./spawn-sandbox.sh <client-id>   # start an engagement → prints the sandbox HTTPS URL
+./list-sandboxes.sh              # what's currently running
+./status.sh                      # power state + cost overview
+./destroy-sandbox.sh <client-id> # manual teardown (auto-teardown also runs)
+./destroy-everything.sh          # delete both v2 resource groups
 ```
 
-### 2. Run
+Automatic destruction is handled by the Functions cleanup timer — no button needed. Provider dashboard:
+`https://func-confidant-kcrrr5q7.azurewebsites.net/api/dashboard?code=<key>` (key via `az functionapp keys list -n func-confidant-kcrrr5q7 -g confidant-core-rg --query functionKeys.default -o tsv`).
 
-```bash
-./start.sh
-```
-
-Opens:
-- **Backend API** → `http://localhost:8000` (Swagger docs at `/docs`)
-- **Frontend** → `http://localhost:3000`
+Runbook and cost breakdown: [infra/v2/OPERATIONS.md](infra/v2/OPERATIONS.md).
 
 ---
 
-## LLM providers
+## Local development
 
-### Anthropic (default)
-
-```env
-LLM_PROVIDER=anthropic
-ANTHROPIC_API_KEY=sk-ant-...
-ANTHROPIC_MODEL=claude-sonnet-4-6   # optional override
-```
-
-### Local MLX model
-
-Uses [`mlx_lm.server`](https://github.com/ml-explore/mlx-lm) — exposes an OpenAI-compatible API on port 8080. Runs entirely on-device (Apple Silicon).
+The app still runs standalone without Azure (local model or Anthropic):
 
 ```bash
-# Start the inference server (downloads model on first run, ~2-8 GB)
-cd /path/to/local-ai/mlx
-./start.sh                                          # Qwen3.5-4B-MLX-4bit (default)
-./start.sh --model mlx-community/Qwen3-14B-4bit    # larger model
+cp backend/.env.example backend/.env      # set LLM_PROVIDER + model/base URL
+./start.sh                                 # backend :8000 (Swagger at /docs), frontend :3000
 ```
 
-```env
-# backend/.env
-LLM_PROVIDER=mlx
-MLX_BASE_URL=http://localhost:8080/v1
-MLX_MODEL=mlx-community/Qwen3.5-4B-MLX-4bit
-```
-
-The Q&A interface shows a green **"Local MLX · \<model\>"** badge when running on-device.
-
-> **Note on embeddings:** Both providers use ChromaDB's local `all-MiniLM-L6-v2` for retrieval. The LLM provider only affects answer generation — switching providers does not change what gets retrieved.
+Point `LOCAL_LLM_BASE_URL` at any OpenAI-compatible server (llama.cpp, Ollama, LM Studio, MLX). Without ACS configured, verification codes are returned in the API response (dev mock).
 
 ---
 
 ## User flows
 
-### Sender
+### Provider
+1. Register at `/login` → `/dashboard` → **Create Room**
+2. **Documents** → upload a PDF (toggle **company knowledge base** to share it across all rooms)
+3. **Access** → invite the client by email → copy the invite link
+4. **Audit Log** → monitor in real time / export CSV
+5. **Insights** (`/insights`) → categories, 14-day trend, top topics, opted-in conversations
 
-1. Register at `/login` → create account
-2. Dashboard (`/dashboard`) → **Create New Room**
-3. Room detail → **Documents** tab → upload PDF, DOCX, or XLSX files
-4. **Access** tab → enter recipient email → **Send Invite** → copy link
-5. **Audit Log** tab → monitor questions in real time or export CSV
-
-### Recipient
-
+### Client
 1. Open the invite link (`/join/{token}`)
-2. Enter your email address → receive a 6-digit verification code
-3. Enter the code → review and accept room terms
-4. Ask questions in the chat interface → receive cited AI answers
-
-> **Demo note:** In development the verification code is returned directly in the API response (shown on-screen). Wire in SMTP/SendGrid before any production use.
-
----
-
-## Project structure
-
-```
-secure-document-room/
-├── backend/
-│   ├── main.py                     # FastAPI app, CORS, startup
-│   ├── models.py                   # SQLAlchemy ORM models
-│   ├── schemas.py                  # Pydantic request/response types
-│   ├── auth.py                     # JWT + bcrypt
-│   ├── database.py                 # SQLite engine + session factory
-│   ├── routes/
-│   │   ├── auth.py                 # /api/auth/*
-│   │   ├── rooms.py                # /api/rooms/*
-│   │   ├── documents.py            # /api/rooms/{id}/documents
-│   │   ├── invites.py              # /api/rooms/{id}/invites + members
-│   │   ├── join.py                 # /api/join/{token}/* (recipient flow)
-│   │   ├── qa.py                   # /api/rooms/{id}/qa
-│   │   └── audit.py                # /api/rooms/{id}/audit + export
-│   └── services/
-│       ├── document_processor.py   # PDF/DOCX/XLSX extraction + chunking
-│       ├── rag_engine.py           # ChromaDB retrieval + LLM dispatch
-│       └── audit_service.py        # Append-only event logging
-├── frontend/
-│   └── src/
-│       ├── app/
-│       │   ├── page.tsx            # Landing page
-│       │   ├── login/              # Sender auth
-│       │   ├── dashboard/          # Room list + management
-│       │   ├── join/[token]/       # Recipient onboarding flow
-│       │   └── room/[roomId]/      # Q&A interface
-│       └── lib/
-│           ├── api.ts              # Typed API client
-│           └── auth.ts             # Token storage helpers
-├── start.sh                        # Launch both servers
-├── ARCHITECTURE.md                 # System architecture + upgrade paths
-├── DESIGN.md                       # Engineering + product decisions
-├── LLM_CALL_FLOW.md                # Full LLM call trace + provider config
-└── HOW_DOES_ALL_CONVERGE.md        # New engineer orientation guide
-```
+2. Enter your email → receive a 6-digit code (via ACS email in production)
+3. Enter the code → review terms → **choose sharing mode** (anonymized topics only, default; or full conversation)
+4. Read / download the document; ask the local model questions
+5. **Download with conversation summary** for a take-away record
+6. **End Session** → the sandbox (and all its data) is destroyed
 
 ---
 
-## API reference
-
-Interactive Swagger UI available at `http://localhost:8000/docs` when the backend is running.
-
-Key endpoints:
+## Key API endpoints
 
 | Method | Path | Auth | Description |
 |--------|------|------|-------------|
-| `POST` | `/api/auth/register` | — | Create sender account |
-| `POST` | `/api/auth/login` | — | Sign in, receive JWT |
-| `GET` | `/api/rooms` | JWT | List sender's rooms |
-| `POST` | `/api/rooms` | JWT | Create room |
-| `POST` | `/api/rooms/{id}/documents` | JWT | Upload document (triggers background indexing) |
-| `POST` | `/api/rooms/{id}/invites` | JWT | Invite recipient, get invite link |
-| `DELETE` | `/api/rooms/{id}/members/{mid}` | JWT | Revoke recipient access |
-| `GET` | `/api/join/{token}` | — | Recipient: get room info + terms |
-| `POST` | `/api/join/{token}/verify` | — | Recipient: submit email |
-| `POST` | `/api/join/{token}/confirm` | — | Recipient: submit verification code |
-| `POST` | `/api/join/{token}/accept` | — | Recipient: accept terms → session token |
-| `POST` | `/api/rooms/{id}/qa` | JWT or session | Ask a question |
-| `GET` | `/api/rooms/{id}/audit` | JWT | Fetch audit log |
-| `GET` | `/api/rooms/{id}/audit/export` | JWT | Download audit CSV |
-| `GET` | `/api/llm-config` | — | Active LLM provider + model (no secrets) |
+| `GET` | `/api/llm-config` | — | Active provider + model |
+| `POST` | `/api/rooms/{id}/documents` | provider | Upload PDF (`scope=room\|knowledge`) |
+| `GET` | `/api/rooms/{id}/documents/{id}/file[?with_appendix=1]` | provider or client | View/download PDF (+ conversation appendix) |
+| `POST` | `/api/join/{token}/accept` | invite | Accept terms + `sharing_mode` |
+| `POST` | `/api/rooms/{id}/sharing-mode` | client session | Change sharing mode |
+| `POST` | `/api/rooms/{id}/qa` | provider or client | Grounded, cited Q&A |
+| `POST` | `/api/session/close` | client session | End session → triggers destruction |
+| `GET` | `/api/insights[?room_id=]` | provider | Aggregated analytics |
 
----
-
-## Configuration reference
-
-All config lives in `backend/.env`:
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `SECRET_KEY` | `dev-secret-key-...` | JWT signing key — **change in production** |
-| `DATABASE_URL` | `sqlite:///./secure_room.db` | SQLAlchemy connection string |
-| `UPLOAD_DIR` | `./uploads` | Where uploaded files are stored |
-| `CHROMA_DIR` | `./data/chroma` | ChromaDB persistence directory |
-| `FRONTEND_URL` | `http://localhost:3000` | Used for CORS and invite link generation |
-| `LLM_PROVIDER` | `anthropic` | `anthropic` or `mlx` |
-| `ANTHROPIC_API_KEY` | — | Required when `LLM_PROVIDER=anthropic` |
-| `ANTHROPIC_MODEL` | `claude-sonnet-4-6` | Any Anthropic model ID |
-| `MLX_BASE_URL` | `http://localhost:8080/v1` | MLX server endpoint |
-| `MLX_MODEL` | `mlx-community/Qwen3.5-4B-MLX-4bit` | Any HuggingFace MLX model ID |
-
----
-
-## Known limitations
-
-These are intentional trade-offs documented in the product brief, not bugs:
-
-- **Screenshots cannot be prevented.** The product's defense is accountability (audit trail, legal terms, watermarking post-MVP) and meaningful friction, not a cryptographic guarantee against all extraction.
-- **Cloud LLM sees document chunks.** When using Anthropic, document passages are sent to Anthropic's API. Enterprise zero-training DPAs reduce risk. Use the MLX provider for fully on-device inference.
-- **AI answers can be wrong.** RAG is not infallible. Answers include disclaimers and citations; material facts should be verified against source documents before acting on them.
-- **Email verification is mocked in dev.** The 6-digit code is returned in the API response. Wire in real email before any non-demo use.
+Interactive Swagger UI at `/docs` when the backend is running.
 
 ---
 
@@ -237,7 +123,21 @@ These are intentional trade-offs documented in the product brief, not bugs:
 
 | File | Contents |
 |------|----------|
-| [ARCHITECTURE.md](ARCHITECTURE.md) | System layers, data stores, security model, production upgrade paths |
-| [DESIGN.md](DESIGN.md) | Engineering and product decisions with rationale |
-| [LLM_CALL_FLOW.md](LLM_CALL_FLOW.md) | Full LLM call trace, system prompt, provider config, failure modes |
-| [HOW_DOES_ALL_CONVERGE.md](HOW_DOES_ALL_CONVERGE.md) | New engineer orientation: entry points, full flow diagram, key concepts |
+| [SPEC.md](SPEC.md) | Product spec (v2) — problem, trust model, architecture, buttons, verified e2e, open items |
+| [SAD.md](SAD.md) | Solution Architecture Document — overview, topology, data flow, UX/functional, NFRs |
+| [ARCHITECTURE.md](ARCHITECTURE.md) | Application internals — layers, routes, services, data stores |
+| [DESIGN.md](DESIGN.md) | Engineering + product decisions with rationale (incl. v2 decisions D-117–D-123) |
+| [LLM_CALL_FLOW.md](LLM_CALL_FLOW.md) | The three LLM call sites — Q&A, insight classification, appendix summary |
+| [HOW_DOES_ALL_CONVERGE.md](HOW_DOES_ALL_CONVERGE.md) | New-engineer orientation: entry points, full flow, key concepts |
+| [HANDOFF.md](HANDOFF.md) | Pickup brief for the next engineer/agent |
+| [infra/v2/OPERATIONS.md](infra/v2/OPERATIONS.md) | Azure runbook + cost table |
+
+---
+
+## Known limitations
+
+- **⚠ ACS email deliverability unconfirmed** — see [SPEC.md §7](SPEC.md) / D-122; fix before first real client.
+- **CPU inference is modest** (~8 tok/s) — GPU quota is the upgrade lever.
+- **Max 2 concurrent sandboxes** under the 10-vCPU regional cap.
+- **Provider accounts are per-sandbox** (live in the VM's SQLite; a persistent control plane is the main v3 candidate).
+- **Screenshots can't be prevented**; **AI answers can be wrong** (citations + disclaimers mitigate).

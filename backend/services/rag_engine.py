@@ -22,14 +22,50 @@ Rules you must follow:
 5. Add a brief disclaimer that answers should be verified against source documents for legal or financial decisions."""
 
 
+def _get_provider() -> str:
+    """Normalized LLM provider: "local" or "anthropic".
+
+    "mlx" is accepted as a backward-compatible alias for "local" (the previous
+    name of the local OpenAI-compatible provider).
+    """
+    provider = os.getenv("LLM_PROVIDER", "anthropic").strip().lower()
+    if provider in ("local", "mlx"):
+        return "local"
+    return "anthropic"
+
+
+def _local_llm_settings() -> Dict[str, Any]:
+    """Local provider settings. New LOCAL_LLM_* envs win; legacy MLX_* envs are
+    still honored so existing deployments keep working."""
+    base_url = (
+        os.getenv("LOCAL_LLM_BASE_URL")
+        or os.getenv("MLX_BASE_URL")
+        or "http://localhost:11434/v1"  # Ollama's OpenAI-compatible endpoint
+    )
+    # Default matches the llama-server model alias used in deployment. The name
+    # is passed through tolerantly — llama.cpp's llama-server largely ignores
+    # it and serves whatever model it was started with.
+    model = os.getenv("LOCAL_LLM_MODEL") or os.getenv("MLX_MODEL") or "qwen3-8b"
+    max_tokens = int(os.getenv("LOCAL_LLM_MAX_TOKENS") or os.getenv("MLX_MAX_TOKENS") or "1024")
+    disable_thinking = (
+        os.getenv("LOCAL_LLM_DISABLE_THINKING") or os.getenv("MLX_DISABLE_THINKING") or "true"
+    ).lower() in ("1", "true", "yes")
+    return {
+        "base_url": base_url,
+        "model": model,
+        "max_tokens": max_tokens,
+        "disable_thinking": disable_thinking,
+    }
+
+
 def get_llm_config() -> Dict[str, str]:
     """Return current LLM provider configuration (no secrets)."""
-    provider = os.getenv("LLM_PROVIDER", "anthropic")
-    if provider == "mlx":
+    if _get_provider() == "local":
+        settings = _local_llm_settings()
         return {
-            "provider": "mlx",
-            "model": os.getenv("MLX_MODEL", "mlx-community/Qwen3.5-4B-MLX-4bit"),
-            "base_url": os.getenv("MLX_BASE_URL", "http://localhost:8080/v1"),
+            "provider": "local",
+            "model": settings["model"],
+            "base_url": settings["base_url"],
         }
     return {
         "provider": "anthropic",
@@ -61,10 +97,32 @@ def _get_collection(room_id: str):
     )
 
 
-def index_document(room_id: str, doc_id: str, doc_name: str, chunks: List[Dict[str, Any]]) -> int:
+def _get_knowledge_collection():
+    """Single shared company-knowledge collection. Rows are keyed by sender_id
+    metadata so one sender never retrieves another sender's knowledge docs."""
+    client = get_chroma_client()
+    return client.get_or_create_collection(
+        name="company_knowledge",
+        embedding_function=_get_embedding_fn(),
+    )
+
+
+def index_document(
+    room_id: str,
+    doc_id: str,
+    doc_name: str,
+    chunks: List[Dict[str, Any]],
+    scope: str = "room",
+    sender_id: int = None,
+) -> int:
     if not chunks:
         return 0
-    collection = _get_collection(room_id)
+    if scope == "knowledge":
+        if sender_id is None:
+            raise ValueError("sender_id is required to index knowledge-scoped documents")
+        collection = _get_knowledge_collection()
+    else:
+        collection = _get_collection(room_id)
     ids, texts, metadatas = [], [], []
     for i, chunk in enumerate(chunks):
         chunk_id = f"{doc_id}_chunk_{i}"
@@ -74,6 +132,9 @@ def index_document(room_id: str, doc_id: str, doc_name: str, chunks: List[Dict[s
         meta["doc_id"] = doc_id
         meta["doc_name"] = doc_name
         meta["chunk_index"] = i
+        meta["scope"] = scope
+        if scope == "knowledge":
+            meta["sender_id"] = str(sender_id)
         clean_meta = {
             k: str(v) if not isinstance(v, (str, int, float, bool)) else v
             for k, v in meta.items()
@@ -84,9 +145,9 @@ def index_document(room_id: str, doc_id: str, doc_name: str, chunks: List[Dict[s
     return len(chunks)
 
 
-def delete_document_from_index(room_id: str, doc_id: str):
+def delete_document_from_index(room_id: str, doc_id: str, scope: str = "room"):
     try:
-        collection = _get_collection(room_id)
+        collection = _get_knowledge_collection() if scope == "knowledge" else _get_collection(room_id)
         results = collection.get(where={"doc_id": doc_id})
         if results["ids"]:
             collection.delete(ids=results["ids"])
@@ -96,22 +157,22 @@ def delete_document_from_index(room_id: str, doc_id: str):
 
 # ── LLM provider calls ──────────────────────────────────────────────────────
 
-def _call_anthropic(user_message: str) -> str:
+def _call_anthropic(user_message: str, system_prompt: str, max_tokens: int) -> str:
     from anthropic import Anthropic
 
     api_key = os.getenv("ANTHROPIC_API_KEY", "")
     if not api_key or api_key.startswith("your-"):
         raise ValueError(
             "ANTHROPIC_API_KEY is not configured. Set a real key in backend/.env, "
-            "or set LLM_PROVIDER=mlx to use a local model."
+            "or set LLM_PROVIDER=local to use a local model."
         )
 
     model = os.getenv("ANTHROPIC_MODEL", "claude-sonnet-4-6")
     client = Anthropic(api_key=api_key)
     message = client.messages.create(
         model=model,
-        max_tokens=1024,
-        system=SYSTEM_PROMPT,
+        max_tokens=max_tokens,
+        system=system_prompt,
         messages=[{"role": "user", "content": user_message}],
     )
     return message.content[0].text if message.content else "Unable to generate answer."
@@ -122,27 +183,29 @@ def _strip_think(text: str) -> str:
     return re.sub(r"<think>.*?</think>", "", text or "", flags=re.DOTALL).strip()
 
 
-def _call_mlx(user_message: str) -> str:
+def _call_local(user_message: str, system_prompt: str, max_tokens) -> str:
+    """Call any local OpenAI-compatible server (Ollama, MLX, llama.cpp, ...)."""
     from openai import OpenAI
 
-    base_url = os.getenv("MLX_BASE_URL", "http://localhost:8080/v1")
-    model = os.getenv("MLX_MODEL", "mlx-community/Qwen3.5-4B-MLX-4bit")
-    max_tokens = int(os.getenv("MLX_MAX_TOKENS", "1024"))
-    disable_thinking = os.getenv("MLX_DISABLE_THINKING", "true").lower() in ("1", "true", "yes")
+    settings = _local_llm_settings()
 
     # Reasoning models (Qwen3, etc.) otherwise spend the whole token budget in a
     # <think>/reasoning channel and leave the answer content empty. For this
     # extraction-style RAG task we want a direct answer.
-    extra_body = {"chat_template_kwargs": {"enable_thinking": False}} if disable_thinking else {}
+    extra_body = (
+        {"chat_template_kwargs": {"enable_thinking": False}}
+        if settings["disable_thinking"]
+        else {}
+    )
 
-    client = OpenAI(base_url=base_url, api_key="not-required")
+    client = OpenAI(base_url=settings["base_url"], api_key="not-required")
     response = client.chat.completions.create(
-        model=model,
+        model=settings["model"],
         messages=[
-            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_message},
         ],
-        max_tokens=max_tokens,
+        max_tokens=max_tokens if max_tokens is not None else settings["max_tokens"],
         stream=False,
         extra_body=extra_body,
     )
@@ -155,38 +218,83 @@ def _call_mlx(user_message: str) -> str:
     return content or "Unable to generate answer."
 
 
+def call_llm(user_message: str, system_prompt: str = SYSTEM_PROMPT, max_tokens: int = None) -> str:
+    """Provider-agnostic single-turn LLM call (used by Q&A and insights).
+
+    max_tokens=None means "provider default" (LOCAL_LLM_MAX_TOKENS for local,
+    1024 for anthropic)."""
+    if _get_provider() == "local":
+        return _call_local(user_message, system_prompt, max_tokens)
+    return _call_anthropic(user_message, system_prompt, max_tokens or 1024)
+
+
 def _call_llm(user_message: str) -> str:
-    provider = os.getenv("LLM_PROVIDER", "anthropic")
-    if provider == "mlx":
-        return _call_mlx(user_message)
-    return _call_anthropic(user_message)
+    return call_llm(user_message)
 
 
 # ── Main entry point ─────────────────────────────────────────────────────────
 
-def answer_question(room_id: str, question: str) -> Dict[str, Any]:
-    collection = _get_collection(room_id)
-    count = collection.count()
-    if count == 0:
+RETRIEVAL_TOP_K = 5
+
+
+def _query_collection(collection, question: str, n_results: int, where: dict = None):
+    """Query a collection and return a list of (distance, text, metadata)."""
+    kwargs = {"query_texts": [question], "n_results": n_results}
+    if where:
+        kwargs["where"] = where
+    results = collection.query(**kwargs)
+    docs = results["documents"][0] if results["documents"] else []
+    metas = results["metadatas"][0] if results["metadatas"] else []
+    dists = results["distances"][0] if results.get("distances") else [0.0] * len(docs)
+    return list(zip(dists, docs, metas))
+
+
+def _retrieve(room_id: str, question: str, sender_id: int = None) -> List[tuple]:
+    """Merge results from the room collection and the sender's company knowledge
+    collection, sorted by relevance (ascending distance), top RETRIEVAL_TOP_K.
+
+    A room with zero room-scoped documents still answers from knowledge docs."""
+    hits = []
+
+    room_collection = _get_collection(room_id)
+    room_count = room_collection.count()
+    if room_count > 0:
+        hits.extend(_query_collection(room_collection, question, min(RETRIEVAL_TOP_K, room_count)))
+
+    if sender_id is not None:
+        try:
+            knowledge = _get_knowledge_collection()
+            sender_filter = {"sender_id": str(sender_id)}
+            owned = knowledge.get(where=sender_filter, limit=1)
+            if owned["ids"]:
+                hits.extend(
+                    _query_collection(knowledge, question, RETRIEVAL_TOP_K, where=sender_filter)
+                )
+        except Exception as e:
+            # Knowledge base problems must not take down room Q&A
+            print(f"Knowledge collection query failed (room {room_id}): {e}")
+
+    hits.sort(key=lambda h: h[0])
+    return hits[:RETRIEVAL_TOP_K]
+
+
+def answer_question(room_id: str, question: str, sender_id: int = None) -> Dict[str, Any]:
+    hits = _retrieve(room_id, question, sender_id=sender_id)
+    if not hits:
         return {
             "answer": "No documents have been indexed in this room yet. Please ask the room owner to upload documents.",
             "citations": [],
         }
 
-    results = collection.query(query_texts=[question], n_results=min(5, count))
-    docs = results["documents"][0] if results["documents"] else []
-    metas = results["metadatas"][0] if results["metadatas"] else []
-
-    if not docs:
-        return {
-            "answer": "I couldn't find relevant information to answer your question.",
-            "citations": [],
-        }
+    docs = [h[1] for h in hits]
+    metas = [h[2] for h in hits]
 
     context_parts = []
     all_citations = []  # indexed 0..N-1, marker number = index + 1
     for i, (doc_text, meta) in enumerate(zip(docs, metas)):
         doc_name = meta.get("doc_name", "Unknown Document")
+        if meta.get("scope") == "knowledge":
+            doc_name = f"{doc_name} (Company Knowledge)"
         page_ref = meta.get("page_num") or meta.get("section") or meta.get("sheet_name")
         context_parts.append(
             f"[{i+1}] Source: {doc_name}" + (f" (p.{page_ref})" if page_ref else "") + f"\n{doc_text}"

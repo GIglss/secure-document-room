@@ -1,0 +1,5 @@
+azure-functions>=1.20.0
+azure-identity>=1.17.0
+azure-data-tables>=12.5.0
+azure-mgmt-compute>=33.0.0
+azure-mgmt-network>=28.0.0

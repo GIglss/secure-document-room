@@ -1,0 +1,15 @@
+# Reverse proxy for the Confidant sandbox VM.
+# PUBLIC_HOST is the VM's Azure FQDN -> Caddy provisions Let's Encrypt HTTPS
+# automatically. With PUBLIC_HOST=localhost it serves plain HTTP for local runs.
+{$PUBLIC_HOST:localhost} {
+	encode gzip
+
+	@backend path /api/* /docs /docs/* /openapi.json /redoc /health
+	handle @backend {
+		reverse_proxy backend:8000
+	}
+
+	handle {
+		reverse_proxy frontend:3000
+	}
+}

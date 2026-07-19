@@ -24,6 +24,7 @@ export default function RoomDetail() {
   const [auditLog, setAuditLog] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
   const [uploading, setUploading] = useState(false);
+  const [uploadToKnowledge, setUploadToKnowledge] = useState(false);
   const [inviteForm, setInviteForm] = useState({ email: "", name: "" });
   const [inviteResult, setInviteResult] = useState<any>(null);
   const [inviting, setInviting] = useState(false);
@@ -83,7 +84,7 @@ export default function RoomDetail() {
   const handleFileUpload = async (file: File) => {
     setUploading(true); setError("");
     try {
-      await uploadDocument(roomId, file);
+      await uploadDocument(roomId, file, uploadToKnowledge ? "knowledge" : "room");
       const updated = await getDocuments(roomId);
       setDocs(updated);
     } catch (err: unknown) {
@@ -197,17 +198,24 @@ export default function RoomDetail() {
               onClick={() => fileInputRef.current?.click()}
               className="border-2 border-dashed border-gray-300 rounded-xl p-8 text-center cursor-pointer hover:border-blue-400 hover:bg-blue-50 transition mb-6"
             >
-              <input ref={fileInputRef} type="file" accept=".pdf,.docx,.xlsx" className="hidden"
+              <input ref={fileInputRef} type="file" accept=".pdf,application/pdf" className="hidden"
                 onChange={(e) => { const f = e.target.files?.[0]; if (f) handleFileUpload(f); }} />
               {uploading ? (
                 <p className="text-blue-800 font-medium">Uploading and processing...</p>
               ) : (
                 <>
                   <p className="font-medium text-gray-700 mb-1">Click or drag to upload</p>
-                  <p className="text-sm text-gray-400">PDF, DOCX, or XLSX · Max 50MB</p>
+                  <p className="text-sm text-gray-400">PDF only · Max 200 pages · Max 50MB</p>
                 </>
               )}
             </div>
+            <label className="flex items-start gap-2 mb-6 -mt-3 cursor-pointer w-fit">
+              <input type="checkbox" checked={uploadToKnowledge} onChange={(e) => setUploadToKnowledge(e.target.checked)}
+                className="mt-0.5 h-4 w-4 rounded border-gray-300 text-blue-800" />
+              <span className="text-sm text-gray-700">
+                Add to company knowledge base <span className="text-xs text-gray-400">(shared across all rooms)</span>
+              </span>
+            </label>
             {/* Readiness banner */}
             {docs.length > 0 && (
               docs.some((d) => !d.indexed && !d.index_error) ? (
@@ -237,7 +245,9 @@ export default function RoomDetail() {
             )}
             {docs.length === 0 && (
               <div className="bg-blue-50 border border-blue-100 rounded-lg px-4 py-3 text-xs text-blue-700 mb-6">
-                Documents are processed and indexed for AI Q&A. Raw files are never accessible to recipients.
+                Documents are indexed for AI Q&A, and your recipient can view and download them from inside the room.
+                All questions are processed by a local AI model in an isolated sandbox — nothing reaches a public AI provider.
+                Rooms with no documents still answer questions from your company knowledge base.
               </div>
             )}
             {docs.length === 0 ? (
@@ -250,6 +260,11 @@ export default function RoomDetail() {
                       <div className="flex items-center gap-2 mb-0.5">
                         <span className="font-medium text-sm">{doc.original_filename}</span>
                         <span className="text-xs bg-gray-100 text-gray-600 px-1.5 py-0.5 rounded uppercase">{doc.file_type}</span>
+                        {doc.scope === "knowledge" && (
+                          <span className="text-xs px-1.5 py-0.5 rounded bg-purple-100 text-purple-700 font-medium">
+                            Knowledge base
+                          </span>
+                        )}
                         {doc.indexed ? (
                           <span className="text-xs px-1.5 py-0.5 rounded bg-green-100 text-green-700">
                             Ready · {doc.chunks_count} chunks

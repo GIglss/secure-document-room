@@ -1,0 +1,17 @@
+#cloud-config
+# Confidant sandbox VM bootstrap (CPU variant): Docker + compose plugin.
+package_update: true
+package_upgrade: false
+
+packages:
+  - ca-certificates
+  - curl
+
+runcmd:
+  # Docker Engine + compose plugin (official convenience script installs both)
+  - curl -fsSL https://get.docker.com | sh
+  - systemctl enable --now docker
+  - usermod -aG docker azureuser
+  # App directory (deploy-app.sh rsyncs the repo here)
+  - mkdir -p /opt/confidant
+  - chown azureuser:azureuser /opt/confidant

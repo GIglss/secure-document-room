@@ -1,6 +1,6 @@
 import uuid
 from datetime import datetime
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request
 from sqlalchemy.orm import Session
 from database import get_db
 import models, schemas
@@ -8,7 +8,9 @@ import config
 from auth import get_optional_user
 from services.rag_engine import answer_question
 from services.audit_service import log_event
+from services.insights_service import generate_insight
 from services.rate_limit import check_rate_limit
+from services.session_service import touch_activity
 
 router = APIRouter(prefix="/rooms", tags=["qa"])
 
@@ -42,6 +44,8 @@ def _resolve_access(room_id: str, payload: schemas.QARequest, current_user, db: 
             raise HTTPException(status_code=403, detail="Invalid session or terms not accepted")
         if member.session_expires_at and member.session_expires_at < datetime.utcnow():
             raise HTTPException(status_code=401, detail="Session expired. Please rejoin the room.")
+        # Session lifecycle signal (throttled) for the sandbox cleanup listener
+        touch_activity(db, member)
         return room, None, member.id
 
     raise HTTPException(status_code=401, detail="Authentication required")
@@ -52,6 +56,7 @@ def ask_question(
     room_id: str,
     payload: schemas.QARequest,
     request: Request,
+    background_tasks: BackgroundTasks,
     current_user=Depends(get_optional_user),
     db: Session = Depends(get_db),
 ):
@@ -69,7 +74,10 @@ def ask_question(
         )
 
     try:
-        result = answer_question(room_id, payload.question)
+        # room.sender_id (the owner) keys the shared company-knowledge
+        # collection, so knowledge docs answer questions in every one of the
+        # sender's rooms — even rooms with zero room-scoped documents.
+        result = answer_question(room_id, payload.question, sender_id=room.sender_id)
     except ValueError as e:
         # Misconfiguration (e.g. missing/placeholder API key) — actionable message
         raise HTTPException(status_code=503, detail=str(e))
@@ -92,6 +100,12 @@ def ask_question(
         sender_id=sender_id,
         member_id=member_id,
         ip_address=request.client.host if request.client else None,
+    )
+
+    # Analytics backbone: classify the exchange after the response is sent.
+    # Failures inside the task are logged and never affect Q&A.
+    background_tasks.add_task(
+        generate_insight, room_id, member_id, payload.question, result["answer"]
     )
 
     return {

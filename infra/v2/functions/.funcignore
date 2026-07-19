@@ -1,0 +1,6 @@
+.git*
+.vscode
+__pycache__
+.python_packages
+local.settings.json
+README.md

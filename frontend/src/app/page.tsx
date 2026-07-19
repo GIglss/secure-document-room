@@ -21,7 +21,7 @@ export default function Landing() {
           The secure room where AI meets confidentiality
         </h1>
         <p className="text-xl text-gray-600 mb-10 max-w-2xl mx-auto">
-          Share confidential documents with external parties. Enable AI-powered Q&A. Neither side can extract content to a public AI model.
+          Share confidential documents with your counterparty. They can view, download, and interrogate them with AI — processed entirely by a local sovereign model inside an isolated sandbox that is destroyed after the engagement.
         </p>
         <Link href="/login" className="bg-blue-800 text-white px-8 py-4 rounded-lg text-lg font-medium hover:bg-blue-900 transition inline-block">
           Create Your First Room
@@ -31,12 +31,12 @@ export default function Landing() {
       {/* Features */}
       <div className="max-w-5xl mx-auto px-6 py-16 grid grid-cols-1 md:grid-cols-3 gap-8">
         <div className="bg-gray-50 border border-gray-200 rounded-xl p-6">
-          <div className="text-2xl mb-3">Sealed Environment</div>
-          <p className="text-gray-600 text-sm">Documents never leave the controlled room. No download buttons. No raw file access. AI answers are synthesized, not raw text.</p>
+          <div className="text-2xl mb-3">Sovereign Local AI</div>
+          <p className="text-gray-600 text-sm">Questions are processed by a local AI model inside an isolated sandbox that is destroyed after the engagement. No document, question, or answer ever reaches a public AI provider.</p>
         </div>
         <div className="bg-gray-50 border border-gray-200 rounded-xl p-6">
           <div className="text-2xl mb-3">AI-Powered Q&A</div>
-          <p className="text-gray-600 text-sm">Recipients ask natural language questions and get grounded, cited answers backed by the uploaded documents — without ever seeing raw content.</p>
+          <p className="text-gray-600 text-sm">Recipients view and download the documents, ask natural language questions, and get grounded, cited answers backed by the uploaded PDFs.</p>
         </div>
         <div className="bg-gray-50 border border-gray-200 rounded-xl p-6">
           <div className="text-2xl mb-3">Full Audit Trail</div>
@@ -50,7 +50,7 @@ export default function Landing() {
           <blockquote className="text-2xl font-medium text-blue-900 mb-4">
             "You use DocuSign to create a trusted envelope for signatures. This is the trusted envelope for AI-era document review."
           </blockquote>
-          <p className="text-gray-600">In 2026, feeding a client's documents into a public AI model can waive attorney-client privilege. We built the room where neither side has to take that risk.</p>
+          <p className="text-gray-600">In 2026, feeding a client's documents into a public AI model can waive attorney-client privilege. We built the room where the AI runs locally, in an ephemeral sandbox, so neither side has to take that risk.</p>
         </div>
       </div>
 

@@ -6,6 +6,7 @@ from database import get_db
 import models, schemas
 from auth import get_current_user
 from services.audit_service import log_event
+from services.session_service import touch_activity
 
 router = APIRouter(prefix="/rooms", tags=["rooms"])
 
@@ -110,6 +111,36 @@ def update_room(
     r.document_count = len(room.documents)
     r.member_count = len([m for m in room.members if m.status != "revoked"])
     return r
+
+
+@router.post("/{room_id}/sharing-mode", response_model=schemas.SharingModeResponse)
+def set_sharing_mode(
+    room_id: str,
+    payload: schemas.SharingModeRequest,
+    db: Session = Depends(get_db),
+):
+    """Recipient-facing: change the conversation sharing consent for this room.
+
+    Authenticated via the recipient session token (same pattern as Q&A), not a
+    sender JWT — only the recipient can change their own consent.
+    """
+    member = db.query(models.RoomMember).filter(
+        models.RoomMember.session_token == payload.session_token,
+        models.RoomMember.room_id == room_id,
+    ).first()
+    if not member or member.status != "accepted":
+        raise HTTPException(status_code=403, detail="Invalid session or terms not accepted")
+    if member.session_expires_at and member.session_expires_at < datetime.utcnow():
+        raise HTTPException(status_code=401, detail="Session expired. Please rejoin the room.")
+    touch_activity(db, member)
+    member.sharing_mode = payload.sharing_mode
+    db.commit()
+    log_event(
+        db, room_id, "sharing_mode_changed",
+        {"email": member.email, "sharing_mode": payload.sharing_mode},
+        member_id=member.id,
+    )
+    return {"room_id": room_id, "sharing_mode": member.sharing_mode}
 
 
 @router.delete("/{room_id}", status_code=204)

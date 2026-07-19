@@ -1,0 +1,100 @@
+# Secure Document Room — production stack for a single "sandbox VM".
+#
+# Required .env (deploy-app.sh generates it on the VM at /opt/confidant/.env):
+#   PUBLIC_HOST     confidant-xxxx.westeurope.cloudapp.azure.com   (VM FQDN, no scheme)
+#   PUBLIC_ORIGIN   https://confidant-xxxx.westeurope.cloudapp.azure.com
+#   SECRET_KEY      random hex (generated once, preserved across deploys)
+#   LOCAL_LLM_MODEL qwen3:4b (CPU VM) or qwen3:8b (GPU VM)
+#   AZURE_TABLES_ENDPOINT or AZURE_TABLES_CONNECTION_STRING
+#   ACS_CONNECTION_STRING, ACS_SENDER_ADDRESS
+#
+# CPU VM:  docker compose -f docker-compose.prod.yml up -d --build
+# GPU VM:  docker compose -f docker-compose.prod.yml -f docker-compose.gpu.yml up -d --build
+
+name: confidant
+
+services:
+  caddy:
+    image: caddy:2
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    environment:
+      PUBLIC_HOST: ${PUBLIC_HOST:-localhost}
+    volumes:
+      - ./infra/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    depends_on:
+      - backend
+      - frontend
+
+  backend:
+    build:
+      context: ./backend
+    restart: unless-stopped
+    expose:
+      - "8000"
+    environment:
+      DEV_MODE: "false"
+      SECRET_KEY: ${SECRET_KEY:?SECRET_KEY must be set in .env}
+      FRONTEND_URL: ${PUBLIC_ORIGIN:-http://localhost:3000}
+      DATABASE_URL: sqlite:////app/data/secure_room.db
+      UPLOAD_DIR: /app/uploads
+      CHROMA_DIR: /app/data/chroma
+      # Local LLM via Ollama (OpenAI-compatible endpoint)
+      LLM_PROVIDER: local
+      LOCAL_LLM_BASE_URL: http://ollama:11434/v1
+      LOCAL_LLM_MODEL: ${LOCAL_LLM_MODEL:-qwen3:4b}
+      LOCAL_LLM_MAX_TOKENS: ${LOCAL_LLM_MAX_TOKENS:-1024}
+      # Durable anonymized insights (Azure Table Storage, survives VM deletion).
+      # Either endpoint (+ VM managed identity via IMDS) or a connection string.
+      AZURE_TABLES_ENDPOINT: ${AZURE_TABLES_ENDPOINT:-}
+      AZURE_TABLES_CONNECTION_STRING: ${AZURE_TABLES_CONNECTION_STRING:-}
+      # Email verification codes via Azure Communication Services
+      ACS_CONNECTION_STRING: ${ACS_CONNECTION_STRING:-}
+      ACS_SENDER_ADDRESS: ${ACS_SENDER_ADDRESS:-}
+    volumes:
+      - backend-uploads:/app/uploads
+      - backend-data:/app/data
+    depends_on:
+      - ollama
+
+  frontend:
+    build:
+      context: ./frontend
+      args:
+        NEXT_PUBLIC_API_URL: ${PUBLIC_ORIGIN:-http://localhost:8000}
+    restart: unless-stopped
+    expose:
+      - "3000"
+
+  ollama:
+    image: ollama/ollama:0.5.7
+    restart: unless-stopped
+    expose:
+      - "11434"
+    volumes:
+      - ollama-models:/root/.ollama
+    environment:
+      OLLAMA_KEEP_ALIVE: 30m
+
+  # One-shot: pulls the model into the shared ollama-models volume, then exits.
+  ollama-init:
+    image: ollama/ollama:0.5.7
+    restart: "no"
+    depends_on:
+      - ollama
+    environment:
+      OLLAMA_HOST: http://ollama:11434
+    entrypoint: ["/bin/sh", "-c"]
+    command: ["until ollama list >/dev/null 2>&1; do sleep 2; done; ollama pull ${LOCAL_LLM_MODEL:-qwen3:4b}"]
+
+volumes:
+  backend-uploads:
+  backend-data:
+  ollama-models:
+  caddy-data:
+  caddy-config:

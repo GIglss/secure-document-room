@@ -1,146 +1,101 @@
-# LLM Call Flow — Secure Document Room
+# LLM Call Flow — Confidant
 
-There is exactly one LLM call site in the codebase. It lives in `backend/services/rag_engine.py` inside `answer_question()`. All Q&A requests — from both senders and recipients — flow through it.
+In v1 there was a single LLM call site. **v2 has three**, all dispatching through the same provider abstraction in `backend/services/rag_engine.py`:
 
-The provider is selected at runtime via `LLM_PROVIDER` in `.env`. Supported values: `anthropic` (default) and `mlx` (local MLX model via `mlx_lm.server`).
+1. **Q&A answer generation** — `answer_question()` (client/provider question → cited answer)
+2. **Insight classification** — `services/insights_service.py` (question → category + PII-free topic label)
+3. **Conversation-summary appendix** — `services/pdf_appendix.py` (Q&A history → summary prose for the PDF appendix)
 
----
-
-## Call location
-
-**File:** `backend/services/rag_engine.py`  
-**Function:** `answer_question(room_id: str, question: str) -> dict`  
-**Max tokens:** 1024 (Anthropic) / no limit enforced (Ollama)  
-**Dispatch:** `_call_llm()` → `_call_anthropic()` or `_call_ollama()` based on `LLM_PROVIDER`
+The provider is selected at runtime via `LLM_PROVIDER`: **`local`** (default — llama.cpp / any OpenAI-compatible server), `anthropic`, or `mlx` (legacy alias of `local`). In production the local provider runs llama.cpp serving Qwen3-8B on the sandbox VM, so **all three call sites stay on the VM** — no document content or question text leaves the machine.
 
 ---
 
-## Full call flow
+## Provider dispatch
+
+**File:** `backend/services/rag_engine.py`
+**Dispatch:** `_call_llm(messages)` → `_call_local()` (OpenAI SDK against `LOCAL_LLM_BASE_URL`) or `_call_anthropic()` based on `LLM_PROVIDER`.
+
+| Provider | Client | Model source | Endpoint |
+|---|---|---|---|
+| `local` (default) | `openai.OpenAI` | `LOCAL_LLM_MODEL` (default `qwen3-8b`) | `LOCAL_LLM_BASE_URL` (default `http://llamacpp:8080/v1`) |
+| `anthropic` | Anthropic SDK | `ANTHROPIC_MODEL` (`claude-sonnet-4-6`) | Anthropic API |
+| `mlx` | → treated as `local` | legacy `MLX_*` honored if `LOCAL_*` unset | — |
+
+The active config (provider + model, no secrets) is at `GET /api/llm-config`; the client chat shows a green **"Local model · qwen3-8b — data never leaves the sandbox"** badge when provider is `local`.
+
+---
+
+## Call site 1 — Q&A answer generation
 
 ```
-Browser (recipient or sender)
+Client/Provider ──► POST /api/rooms/{id}/qa { question, session_token? }
   │
-  │  POST /api/rooms/{room_id}/qa
-  │  Body: { question, session_token? }
-  │
-  ▼
-routes/qa.py → _resolve_access()
-  │  Validates: sender JWT OR recipient session_token
-  │  Verifies: room is active, member status = "accepted"
-  │
-  ▼
-services/rag_engine.py → answer_question(room_id, question)
-  │
-  ├─ 1. Retrieval
-  │     ChromaDB collection: room_{room_id}
-  │     Query: question text → DefaultEmbeddingFunction (all-MiniLM-L6-v2, local)
-  │     Returns: top-5 chunks by cosine similarity
-  │     Each chunk carries metadata: doc_name, chunk_index, page_num/section/sheet_name
-  │
-  ├─ 2. Context construction
-  │     Each chunk formatted as:
-  │       "[N] Source: {doc_name} (p.{page_ref})\n{chunk_text}"
-  │     Chunks joined with "---" separator
-  │     Citations list built from metadata (document_name, page_ref, excerpt[:200])
-  │
-  ├─ 3. LLM dispatch → _call_llm(user_message)
-  │
-  │     LLM_PROVIDER=anthropic (default)          LLM_PROVIDER=mlx
-  │     ──────────────────────────────────         ──────────────────────────────
-  │     _call_anthropic(user_message)              _call_mlx(user_message)
-  │       Anthropic SDK                              openai.OpenAI client
-  │       model: ANTHROPIC_MODEL                     base_url: MLX_BASE_URL
-  │               (default: claude-sonnet-4-6)               (default: http://localhost:8080/v1)
-  │       max_tokens: 1024                           model: MLX_MODEL
-  │       system= SYSTEM_PROMPT                              (default: mlx-community/Qwen3.5-4B-MLX-4bit)
-  │       messages: [{role:user, content:…}]         api_key: "not-required"
-  │       (placeholder "your-" key →                 max_tokens: MLX_MAX_TOKENS (default 1024)
-  │        ValueError, actionable msg)               extra_body: enable_thinking=False
-  │       → message.content[0].text                          (MLX_DISABLE_THINKING, default true)
-  │                                                   messages: [system, user], stream: false
-  │                                                 → _strip_think(choices[0].message.content)
-  │                                                   (fallback to .reasoning if content empty)
-  │
-  └─ 4. Return
-        answer_text (raw model output)
-  │
-  ├─ 5. Grounding & citation verification → _ground_answer()
-  │     - If answer contains the "cannot answer from context" phrase:
-  │         → { answer, citations: [], grounded: false }
-  │     - Else parse [N] markers actually used in the answer:
-  │         → return only those retrieved sources, each with its marker `number`
-  │         → if the answer cited nothing, surface the top source as a fallback
-  │         → { answer, citations: [...referenced], grounded: true }
-  │
-  └─ Return { answer, citations, grounded }
-  │
-  ▼
-routes/qa.py
+routes/qa.py → _resolve_access()  (sender JWT OR client session; room active; member accepted)
   │  Rate-limit check (per accessor, per room) BEFORE generation — 429 if exceeded
-  │  Logs to audit_logs: event_type="question_asked"
-  │  event_data includes: question, answer_preview[:200], citation_count, grounded
-  │
   ▼
-HTTP 200 → { answer, citations, grounded, question_id }
+services/rag_engine.py → answer_question(room_id, question, sender_id)
+  ├─ 1. Retrieval — embed question (all-MiniLM-L6-v2, local)
+  │        query room_{id} collection AND the sender's company_knowledge rows
+  │        merge + rank by distance → top-k chunks (knowledge tagged "(Company Knowledge)")
+  ├─ 2. Context — "[N] Source: {doc} (p.{page})\n{chunk}" joined by "---"
+  ├─ 3. _call_llm([system, user])  →  local (llama.cpp) | anthropic
+  ├─ 4. _ground_answer() — keep only [N] sources actually cited; grounded flag;
+  │        top source surfaced as fallback if the answer cited nothing
+  └─ return { answer, citations, grounded }
+  ▼
+routes/qa.py → audit log "question_asked"
+  → schedules BackgroundTask: classify_question(...)   ← call site 2
+  ▼
+HTTP 200 { answer, citations, grounded, question_id }
 ```
 
-**Note on embeddings:** Both providers use the same ChromaDB `DefaultEmbeddingFunction` (all-MiniLM-L6-v2, runs locally). Switching LLM provider does not change retrieval behavior.
+**System prompt** (unchanged intent — the AI-layer enforcement):
+```
+You are a secure document assistant operating inside an isolated sandbox.
+Answer ONLY from the provided document excerpts.
+1. Answer only from context; never invent facts.
+2. Cite sources using [1], [2] notation matching the provided sources.
+3. Never reproduce large verbatim passages — synthesize and paraphrase.
+4. If the answer isn't in context, say so explicitly.
+5. Add a brief disclaimer to verify against source documents for legal/financial decisions.
+```
+
+**What the LLM does NOT receive:** raw files, full document text, anything beyond the retrieved chunks, client identity/session token, or prior Q&A history (each call is stateless).
 
 ---
 
-## System prompt
-
-The system prompt is the primary enforcement mechanism at the AI layer:
+## Call site 2 — Insight classification (background, non-blocking)
 
 ```
-You are a secure document assistant operating inside a sealed document room.
-Your role is to answer questions based ONLY on the provided document excerpts.
-
-Rules you must follow:
-1. Answer only from the provided context. Never invent or extrapolate facts.
-2. Cite sources using [1], [2], etc. notation matching the provided sources.
-3. Never reproduce large verbatim passages. Synthesize and paraphrase.
-4. If the answer is not in the context, say: "The documents in this room do not
-   contain information to answer that question."
-5. Add a brief disclaimer that answers should be verified against source documents
-   for legal or financial decisions.
+BackgroundTask after a successful answer:
+services/insights_service.py → classify_question(question)
+  ├─ _call_llm([system, user])  — same provider
+  │     system: "Classify into exactly one category + a 3-8 word topic label.
+  │              EXCLUDE names, companies, emails, and any PII from the label."
+  │     categories: pricing, legal_terms, technical_capabilities, security_compliance,
+  │                 integration, support, timeline_delivery, competitive_comparison,
+  │                 documentation_content, other
+  ├─ parse response (code-fenced JSON | bare token | garbage → "other")
+  └─ write qa_insights row (question/answer text ONLY if member.sharing_mode == "full")
+       └─ mirror to Azure Table "insights" (managed identity) if configured
 ```
 
-**Why this matters:** Rules 3 and 4 are the containment rules. Rule 3 prevents bulk text extraction through Q&A. Rule 4 prevents hallucination on legal/financial content — a hallucinated clause reference acted on by a lawyer is worse than no answer.
+Failure here is **logged and swallowed** — it must never affect the answer the user already received. This is the only call site whose output is stored durably off-VM.
 
 ---
 
-## User message structure
+## Call site 3 — Conversation-summary appendix (on demand)
 
 ```
-Context from room documents:
-
-[1] Source: AcquisitionAgreement.pdf (p.12)
-{chunk_text_1}
-
----
-
-[2] Source: FinancialModel.xlsx (sheet: P&L)
-{chunk_text_2}
-
----
-
-... (up to 5 chunks)
-
-Question: {question}
-
-Please answer based only on the above context, with appropriate citations.
+GET /api/rooms/{id}/documents/{id}/file?with_appendix=1
+services/pdf_appendix.py → build_appendix(qa_history)
+  ├─ _call_llm([system, user])  — summarize the client's Q&A history
+  ├─ reportlab: render "Conversation Summary" pages (summary + verbatim Q list w/ excerpts)
+  └─ pypdf: merge appendix onto the original PDF
+Fallbacks: LLM unreachable → verbatim list only;  any failure → serve original PDF.
 ```
 
----
-
-## What the LLM does NOT receive
-
-- Raw document files
-- Full document text
-- Any content outside the retrieved top-5 chunks
-- Recipient identity or session token
-- Any prior Q&A history (each call is stateless)
+The download **never fails** — the appendix is best-effort on top of a guaranteed core action (getting the document).
 
 ---
 
@@ -148,80 +103,48 @@ Please answer based only on the above context, with appropriate citations.
 
 | Variable | Default | Purpose |
 |----------|---------|---------|
-| `LLM_PROVIDER` | `anthropic` | `anthropic` or `mlx` |
-| `ANTHROPIC_API_KEY` | — | Required when provider=anthropic |
-| `ANTHROPIC_MODEL` | `claude-sonnet-4-6` | Any Anthropic model ID |
-| `MLX_BASE_URL` | `http://localhost:8080/v1` | MLX server OpenAI-compatible endpoint |
-| `MLX_MODEL` | `mlx-community/Qwen3.5-4B-MLX-4bit` | Any HuggingFace MLX model ID |
-| `MLX_MAX_TOKENS` | `1024` | Max tokens for the generated answer |
-| `MLX_DISABLE_THINKING` | `true` | Suppress reasoning-model `<think>` channel (see below) |
-
-The active config (provider + model, no keys) is exposed at `GET /api/llm-config` and displayed as a badge in the Q&A interface header (green "Local MLX · Qwen3.5-4B-MLX-4bit" vs blue "Cloud · claude-sonnet-4-6").
+| `LLM_PROVIDER` | `local` | `local` \| `anthropic` \| `mlx` (alias) |
+| `LOCAL_LLM_BASE_URL` | `http://llamacpp:8080/v1` | OpenAI-compatible endpoint (llama.cpp/Ollama/LM Studio/MLX) |
+| `LOCAL_LLM_MODEL` | `qwen3-8b` | Model alias (llama.cpp largely ignores it) |
+| `LOCAL_LLM_MAX_TOKENS` | `1024` | Answer cap |
+| `LOCAL_LLM_DISABLE_THINKING` | `true` | Suppress reasoning-model `<think>` channel (see below) |
+| `ANTHROPIC_API_KEY` / `ANTHROPIC_MODEL` | — / `claude-sonnet-4-6` | For `anthropic` provider |
 
 ### Reasoning models (Qwen3 and similar)
-
-Reasoning-tuned models emit a hidden `<think>` / `reasoning` channel before the answer. With `mlx_lm.server`'s default 512-token cap, Qwen3 spent the **entire budget thinking** (`finish_reason: length`) and returned an **empty `content`** — surfacing as "Unable to generate answer."
-
-`_call_mlx()` mitigates this for the extraction-style RAG task:
-1. **Disables thinking** via `extra_body={"chat_template_kwargs": {"enable_thinking": False}}` (`MLX_DISABLE_THINKING=true`), so the model answers directly into `content`.
-2. **Sets `max_tokens`** explicitly (`MLX_MAX_TOKENS`, default 1024) so a full answer isn't truncated.
-3. **`_strip_think()`** removes any leaked `<think>…</think>` block, and if `content` is still empty it falls back to the `reasoning` channel.
-
-To keep a model's reasoning enabled, set `MLX_DISABLE_THINKING=false` and raise `MLX_MAX_TOKENS` (e.g. 2048+) so thinking plus the answer both fit.
-
-### Using MLX
-
-The MLX server (`mlx_lm.server`) exposes an OpenAI-compatible API. Start it from the `local-ai` repo:
-
-```bash
-# Start the inference server (downloads model on first run)
-cd /path/to/local-ai/mlx
-./start.sh                              # uses Qwen3.5-4B-MLX-4bit by default
-./start.sh --model mlx-community/Qwen3-14B-4bit   # larger model
-
-# Then set in backend/.env
-LLM_PROVIDER=mlx
-MLX_MODEL=mlx-community/Qwen3.5-4B-MLX-4bit
-```
-
-Restart the backend. The Q&A interface will show a green **"Local MLX · Qwen3.5-4B-MLX-4bit"** badge.
+Reasoning-tuned models emit a hidden `<think>` channel before answering; with a small token cap they can spend the entire budget thinking and return empty `content`. The local path disables thinking by default (`chat_template_kwargs.enable_thinking=False`), sets an explicit `max_tokens`, strips any leaked `<think>…</think>`, and falls back to the `reasoning` field if `content` is empty. For deliberate multi-hop reasoning, set `LOCAL_LLM_DISABLE_THINKING=false` and raise `LOCAL_LLM_MAX_TOKENS`. (History: D-115.)
 
 ---
 
 ## Failure modes
 
-`routes/qa.py` wraps `answer_question()` so provider failures return a **handled** response that carries CORS headers and a readable `detail` — without the wrapper, an unhandled 500 skips CORS headers and the browser shows a generic "Failed to fetch" instead of the real reason.
+`routes/qa.py` wraps `answer_question()` so provider failures return a **handled** response with CORS headers and a readable `detail` (an unhandled 500 skips CORS → browser shows a generic "Failed to fetch").
 
 | Scenario | Provider | Behavior |
 |----------|----------|---------|
-| No documents indexed in room | both | Returns hardcoded message; no LLM call made |
-| ChromaDB returns no results | both | Returns "couldn't find relevant information"; no LLM call made |
-| `ANTHROPIC_API_KEY` missing / placeholder (`your-…`) | anthropic | `ValueError` → **HTTP 503** with actionable message ("set a real key, or `LLM_PROVIDER=mlx`") |
-| Anthropic rate limit / API error | anthropic | **HTTP 502** `AI provider error: …` (CORS-safe) |
-| MLX server not running | mlx | `openai.APIConnectionError` → **HTTP 502** — run `./start.sh` in `local-ai/mlx` |
-| Model not loaded in MLX server | mlx | Server error → **HTTP 502** — restart server with correct `--model` |
-| Reasoning model returns empty `content` | mlx | Thinking disabled + `_strip_think()`/reasoning fallback; only "Unable to generate answer." if truly empty |
+| No documents indexed (and no knowledge) | both | Hardcoded message; no LLM call |
+| Retrieval returns nothing | both | "Couldn't find relevant information"; no LLM call |
+| Local server (llama.cpp) not reachable | local | `APIConnectionError` → **HTTP 502** (CORS-safe) |
+| Model not loaded | local | Server error → **HTTP 502** |
+| `ANTHROPIC_API_KEY` missing/placeholder | anthropic | **HTTP 503** with actionable message |
+| Anthropic rate limit / API error | anthropic | **HTTP 502** |
+| Reasoning model returns empty `content` | local | Thinking disabled + strip/reasoning fallback; only fails if truly empty |
 | Q&A rate limit exceeded | both | **HTTP 429** before any LLM call |
+| **Insight classification error** | both | Logged + skipped; **Q&A unaffected** |
+| **Appendix LLM error** | both | Falls back to verbatim list / original PDF; download succeeds |
 
 ---
 
-## Token budget (Anthropic provider)
+## Cost
 
-Each call sends approximately:
-- System prompt: ~120 tokens
-- Context (5 chunks × ~200 tokens each): ~1,000 tokens
-- Question: ~30–100 tokens
-- **Input total: ~1,150–1,220 tokens per call**
-- Output cap: 1,024 tokens
-
-At current Anthropic pricing for `claude-sonnet-4-6`, this is approximately $0.003–0.005 per Q&A exchange. With Ollama, cost is zero (hardware only).
+- **Local (default):** zero marginal cost — hardware only (~€0.29/h for the whole `E4s_v6` VM). All three call sites are free.
+- **Anthropic (switch):** Q&A ≈ $0.003–0.005 per exchange (~1.2k input / ≤1k output tokens); classification adds a small call; appendix a larger one.
 
 ---
 
-## Future LLM call sites (post-MVP)
+## Call-site summary
 
-| Feature | Likely location | Notes |
-|---------|----------------|-------|
-| Visible watermark text generation | `services/watermark.py` | Would generate recipient-specific watermark strings |
-| Auto-redaction suggestions | `services/redaction.py` | Would highlight sensitive passages before sender finalizes room |
-| Question topic classification | `routes/qa.py` | Would enforce sender-defined topic restrictions |
+| # | Site | File | Trigger | Blocking? | Output persisted off-VM? |
+|---|------|------|---------|-----------|--------------------------|
+| 1 | Q&A answer | `rag_engine.answer_question` | `POST /qa` | Yes | No |
+| 2 | Insight classification | `insights_service` | background after answer | No | Yes (Azure Table) |
+| 3 | Appendix summary | `pdf_appendix` | `GET .../file?with_appendix=1` | Yes (best-effort) | No |

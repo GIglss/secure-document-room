@@ -1,3 +1,56 @@
+# Documentation Update Trace — v2: Sovereign Ephemeral Sandbox on Azure
+
+> Generated July 19, 2026.
+> Purpose: Records the v2 pivot from a "sealed document room" to a **sovereign, ephemeral, per-client AI sandbox on Azure**, deployed and acceptance-tested end-to-end. Product change: documents are now viewable/downloadable by the client; the privacy guarantee moved to a local model on an isolated VM that is destroyed at engagement end.
+> Status: **APPLIED & DEPLOYED** (Azure, verified live) — July 19, 2026. **Not yet committed** — commit deferred per request.
+
+---
+
+## What Changed in the Codebase
+
+### Product pivot (app)
+- **PDF-only uploads, ≤200 pages, ≤50 MB** enforced (`routes/documents.py`, pypdf page count; frontend `accept=".pdf"` + copy).
+- **Document view/download for the client** — new `GET /api/rooms/{id}/documents/{id}/file` (dual auth: provider JWT or client session), audit-logged (`document_viewed`/`document_downloaded`). Frontend viewer (auth'd blob → iframe) + download buttons. Sealed-room copy removed across landing/join/room/layout + backend `TERMS_TEXT`.
+- **Download-with-appendix** — `?with_appendix=1` merges an LLM-written "Conversation Summary" (new `services/pdf_appendix.py`, reportlab + pypdf) with graceful fallback if the model is down. Added `reportlab` dep.
+- **Session lifecycle** — new `session_activity` table + `services/session_service.py`; `logged_in_at`/`last_activity` (throttled) mirrored to Azure Table `sessions` keyed by `SANDBOX_ID`; new `POST /api/session/close` (`routes/session.py`); frontend **End Session** button + `sendBeacon` on `pagehide`.
+- **Sharing consent kept** — `RoomMember.sharing_mode` (`anonymized` default | `full`); `POST /api/rooms/{id}/sharing-mode`.
+- **Insights** — `services/insights_service.py` classifies each answered question into 10 categories + PII-free topic label; `qa_insights` table stores text only under `full` sharing; mirrored to Azure Table `insights`. Aggregated by `GET /api/insights` (`routes/insights.py`).
+- **Local provider generalized** — `LLM_PROVIDER=local` against llama.cpp OpenAI-compatible endpoint; `LOCAL_LLM_MODEL=qwen3-8b`; `mlx` kept as alias.
+- **Email** — `services/email_service.py` sends verification codes via ACS when configured (⚠ open item: `begin_send` poller not awaited → silent async failures).
+- **Frontend base-URL fix** — `src/lib/api.ts` uses `?? "http://localhost:8000"` + trailing-slash strip; built with `NEXT_PUBLIC_API_URL="/"` for same-origin (Next 14 drops empty-string env inlining).
+
+### Infrastructure (all new, under `infra/v2/`)
+- **`core.bicep` / `main.bicep`** — control plane in `confidant-core-rg`: storage (tables `insights`+`sessions`, Entra-RBAC-only), VNet + locked-down `snet-sandbox` NSG, storage private endpoint, Key Vault + CMK + Disk Encryption Set, Compute Gallery + image definition, Function app shell with scoped RBAC (VM/Network Contributor on sandboxes RG, Table Data Contributor on core storage).
+- **`sandbox.bicep` (+ rbac/table-role modules)** — per-client `E4s_v6` VM from gold image, CMK OS disk `deleteOption: Delete`, system MI, cloud-init `runtime.env` injection (PUBLIC_HOST/SANDBOX_ID/SECRET_KEY/ACS_*), no secrets baked.
+- **Gold image** — gallery version `confidant_gallery/confidant-sandbox:1.0.0`, CMK-encrypted: llama.cpp + Qwen3-8B Q4_K_M (sha-verified) + 4 app docker images + `confidant.service` systemd unit baked in; zero runtime downloads. `docker-compose.sandbox.yml`.
+- **Functions control plane** (`infra/v2/functions/`) — `function_app.py`: 1-min `sandbox_cleanup` timer (closed → immediate delete; active + >`INACTIVITY_MINUTES` idle → hard-delete VM/NIC/PIP/disk, idempotent, never throws), `dashboard_data` JSON aggregate, self-contained `dashboard` HTML page.
+- **Buttons** — `deploy-core.sh`, `spawn-sandbox.sh`, `destroy-sandbox.sh`, `list-sandboxes.sh`, `status.sh`, `destroy-everything.sh`, `lib.sh`, `OPERATIONS.md`.
+- **Landing page** — `goneset-swa` + `confidant-acs` moved to `confidant-landingpage-rg`; `confidant-email` (unmovable) left in `confidant-rg`.
+
+### Azure state (deployed, westeurope, sub goneset)
+Control plane live in `confidant-core-rg`; gold image `1.0.0` Succeeded (CMK); full e2e verified including automatic sandbox destruction ~90s after session close, with insights persisting. Idle cost ~€7.5/mo; sandbox ~€0.29/h.
+
+## Documentation Changes
+
+| File | What was updated |
+|------|-----------------|
+| `SPEC.md` | Rewritten to v2 (sovereign ephemeral sandbox, two-plane Azure architecture, buttons, verified e2e, open items) |
+| `SAD.md` | Created — Solution Architecture Document (overview, technical architecture, data flow, UX/functional, NFRs) |
+| `HANDOFF.md` | Created — pickup brief for the next engineer/agent |
+| `README.md` | Rewritten to v2 — sovereign sandbox framing, two-plane table, buttons, local-model stack, v2 endpoints/flows |
+| `ARCHITECTURE.md` | Rewritten to v2 app internals — runtime topology, new routes (session/insights) + services (insights/session/pdf_appendix/email), company_knowledge + Azure-Table stores, v2 security model (containment = ephemeral VM) |
+| `DESIGN.md` | Added v2 decisions D-117–D-123; marked D-107 superseded by D-120; updated open-decisions statuses (OD-1 resolved, name = Confidant) |
+| `LLM_CALL_FLOW.md` | Rewritten for **three** call sites (Q&A, insight classification, appendix summary) + local llama.cpp provider dispatch; failure modes and cost updated |
+| `HOW_DOES_ALL_CONVERGE.md` | Rewritten to v2 — app-vs-platform framing, provider/client flows incl. view/download + consent + End Session, lifecycle/destruction flow, v2 trust chain |
+| `DOCS_UPDATE_TRACE.md` | This entry |
+
+### Coding plan & next steps (as of this entry)
+1. **Fix ACS email deliverability** (await `begin_send` poller, surface status; consider branded sender domain) — blocks first real client.
+2. **Commit all v2 work** to git (currently working-tree only).
+3. Optional: GPU quota request (faster/bigger model), custom domain + branded email, persistent provider identity (v3), close ACME egress after boot.
+
+---
+
 # Documentation Update Trace — Integration Fixes: MLX Q&A, Indexing Self-Heal, Q&A Error Surfacing
 
 > Generated June 17, 2026.

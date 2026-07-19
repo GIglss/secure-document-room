@@ -8,7 +8,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from database import engine, Base
 import config
-from routes import auth, rooms, documents, invites, join, qa, audit
+from routes import auth, rooms, documents, invites, join, qa, audit, insights, session
 
 FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:3000")
 
@@ -41,7 +41,11 @@ def _reindex_pending_documents():
                     db.commit()
                     print(f"  SKIP  {doc.original_filename}: no extractable text")
                     continue
-                count = index_document(doc.room_id, doc.id, doc.original_filename, chunks)
+                count = index_document(
+                    doc.room_id, doc.id, doc.original_filename, chunks,
+                    scope=doc.scope or "room",
+                    sender_id=doc.room.sender_id if doc.room else None,
+                )
                 doc.indexed = True
                 doc.chunks_count = count
                 doc.index_error = None
@@ -63,16 +67,26 @@ def _reindex_pending_documents():
 def _auto_migrate():
     """Lightweight additive migrations for SQLite (no Alembic in MVP).
     Adds columns introduced after a DB was first created, so existing
-    databases don't break on startup."""
+    databases don't break on startup. New tables (e.g. qa_insights) are
+    handled by create_all; deleting secure_room.db also recreates everything."""
     from sqlalchemy import text, inspect
     inspector = inspect(engine)
-    if "documents" not in inspector.get_table_names():
-        return
-    cols = {c["name"] for c in inspector.get_columns("documents")}
+    tables = set(inspector.get_table_names())
+
+    # (table, column, DDL) — additive only, safe to re-run
+    migrations = [
+        ("documents", "index_error", "ALTER TABLE documents ADD COLUMN index_error TEXT"),
+        ("documents", "scope", "ALTER TABLE documents ADD COLUMN scope TEXT NOT NULL DEFAULT 'room'"),
+        ("room_members", "sharing_mode", "ALTER TABLE room_members ADD COLUMN sharing_mode TEXT NOT NULL DEFAULT 'anonymized'"),
+    ]
     with engine.begin() as conn:
-        if "index_error" not in cols:
-            conn.execute(text("ALTER TABLE documents ADD COLUMN index_error TEXT"))
-            print("Migration: added documents.index_error")
+        for table, column, ddl in migrations:
+            if table not in tables:
+                continue
+            cols = {c["name"] for c in inspector.get_columns(table)}
+            if column not in cols:
+                conn.execute(text(ddl))
+                print(f"Migration: added {table}.{column}")
 
 
 @asynccontextmanager
@@ -99,7 +113,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="Secure Document Room API",
-    description="Sealed AI-powered document room for two-party sensitive document sharing",
+    description="Secure document room: share and review sensitive documents with AI Q&A powered by a local sovereign model inside an ephemeral sandbox",
     version="0.1.0",
     lifespan=lifespan,
 )
@@ -120,6 +134,8 @@ app.include_router(invites.router, prefix="/api")
 app.include_router(join.router, prefix="/api")
 app.include_router(qa.router, prefix="/api")
 app.include_router(audit.router, prefix="/api")
+app.include_router(insights.router, prefix="/api")
+app.include_router(session.router, prefix="/api")
 
 
 @app.get("/")
